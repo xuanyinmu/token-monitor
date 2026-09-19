@@ -111,7 +111,9 @@ set(TMON_WIDGET_SOURCES
     src/widget/MaskIconProvider.cpp
 )
 
-add_executable(TokenMonitor ${TMON_WIDGET_SOURCES})
+# Windowed subsystem: double-clicking the exe must not open a console.
+# --scan-once reattaches to the parent console at runtime (main.cpp).
+add_executable(TokenMonitor WIN32 ${TMON_WIDGET_SOURCES})
 set_target_properties(TokenMonitor PROPERTIES OUTPUT_NAME TokenMonitorQt)
 target_include_directories(TokenMonitor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(TokenMonitor PRIVATE

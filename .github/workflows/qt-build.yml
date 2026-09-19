@@ -1,0 +1,85 @@
+name: Qt build (Windows)
+
+# Unsigned Qt/native Windows build for this fork (and other non-upstream
+# clones), mirroring the windows-exe.yml fork guard. Produces a ready-to-run
+# TokenMonitorQt deployment plus the hub/agent CLIs as artifacts.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+
+concurrency:
+  group: qt-build-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  qt-windows:
+    if: github.repository != 'Javis603/token-monitor'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt 6.8.3 (msvc2022_64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          arch: 'win64_msvc2022_64'
+          cache: true
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        run: cmake -S qt -B qt/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build qt/build
+
+      - name: Checks
+        run: |
+          ./qt/build/TokenMonitorDeltaCheck.exe
+          ./qt/build/TokenMonitorHubCheck.exe
+          ./qt/build/TokenMonitorBurnCheck.exe
+
+      - name: Deploy runtime
+        working-directory: qt/build
+        run: |
+          windeployqt --release --qmldir ../qml --no-translations TokenMonitorQt.exe
+          windeployqt --release --no-translations TokenMonitorHub.exe
+          windeployqt --release --no-translations TokenMonitorAgent.exe
+
+      - name: Upload Qt widget
+        uses: actions/upload-artifact@v4
+        with:
+          name: token-monitor-qt-win
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            qt/build/TokenMonitor*.exe
+            qt/build/*.dll
+            qt/build/platforms/
+            qt/build/styles/
+            qt/build/tls/
+            qt/build/imageformats/
+            qt/build/iconengines/
+            qt/build/networkinformation/
+            qt/build/qml/
+
+      - name: Upload checks log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qt-checks
+          if-no-files-found: ignore
+          retention-days: 7
+          path: qt/build/*.log

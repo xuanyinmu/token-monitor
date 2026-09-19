@@ -12,10 +12,23 @@ cd qt
 . .\scripts\env.ps1
 .\scripts\build.ps1
 .\scripts\download-tokscale.ps1   # once, into %APPDATA%\Token Monitor\tokscale.exe
-.\build\TokenMonitor.exe
+.\scripts\windeploy.ps1           # deploy Qt runtime next to the exes
+.\build\TokenMonitorQt.exe        # windowed subsystem: no console on double-click
 ```
 
-Other binaries: `TokenMonitorHub.exe`, `TokenMonitorAgent.exe`. Widget `--scan-once` prints one usage snapshot as JSON.
+Other binaries: `TokenMonitorHub.exe`, `TokenMonitorAgent.exe` (console CLIs). Widget `--scan-once` prints one usage snapshot as JSON — the exe is windowed, so it reattaches to the parent console when launched from a terminal.
+
+CI: `.github/workflows/qt-build.yml` builds the three exes on Windows, runs the checks below, and uploads a `windeployqt`-deployed, ready-to-run artifact (forks only, mirroring the `windows-exe.yml` guard).
+
+## Runtime dependencies
+
+`scripts/windeploy.ps1` (windeployqt) places everything the exes need next to them:
+
+- Qt6Core / Gui / Widgets / Qml / Quick / QuickControls2 / QuickLayouts / QuickEffects / QuickShapes / Svg / Network / Sql / Concurrent (+ QmlModels/QmlMeta/QmlWorkerScript)
+- `platforms/qwindows.dll`, `styles/`, `imageformats/` (incl. `qsvgicon`), `iconengines/`, `tls/` backends, `networkinformation/`
+- ANGLE/D3D pieces shipped by windeployqt (`D3Dcompiler_47.dll`, `libEGL`, `libGLESv2`, `opengl32sw.dll`)
+
+One non-Qt dependency at runtime: `tokscale.exe` (the vendored usage scanner) under `%APPDATA%\Token Monitor\` — install once with `scripts/download-tokscale.ps1`.
 
 ## Data
 

@@ -19,8 +19,30 @@
 #include <cstdlib>
 #include <iostream>
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <io.h>
+#endif
+
 int main(int argc, char *argv[])
 {
+#ifdef Q_OS_WIN
+    // The exe is windowed (WIN32 subsystem) so double-clicking it opens no
+    // console. Reattach only when a standard handle is missing: launched from
+    // a terminal, stdout/stderr are already valid (pipe or console) and are
+    // printed to as-is; double-click has none, so the app stays silent.
+    auto hasHandle = [](int fd) {
+        intptr_t h = _get_osfhandle(fd);
+        return h != -1 && h != -2;
+    };
+    if (!hasHandle(1) || !hasHandle(2)) {
+        if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+            if (!hasHandle(1)) freopen("CONOUT$", "w", stdout);
+            if (!hasHandle(2)) freopen("CONOUT$", "w", stderr);
+            if (!hasHandle(0)) freopen("CONIN$", "r", stdin);
+        }
+    }
+#endif
     qputenv("QT_QUICK_CONTROLS_STYLE", "Basic");
     QQuickWindow::setDefaultAlphaBuffer(true);
     QCoreApplication::setOrganizationName(QStringLiteral("Javis"));
