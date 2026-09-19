@@ -845,16 +845,26 @@ Flickable {
                 Text {
                     x: parent.width / 2
                     y: 16
-                    text: panel.tr("settings.common.notChecked", "Not checked")
+                    text: app.appUpdateLatest.length > 0 ? app.appUpdateLatest
+                        : panel.tr("settings.common.notChecked", "Not checked")
                     color: Theme.text
                     font.pixelSize: 11
                     font.weight: Font.DemiBold
                     font.family: Theme.fontFamily
                 }
             }
-            GlassButton {
-                text: panel.tr("settings.appUpdate.check", "Check for updates")
-                onClicked: app.checkUpdates()
+            Row {
+                width: parent.width
+                spacing: 8
+                GlassButton {
+                    text: panel.tr("settings.appUpdate.check", "Check for updates")
+                    onClicked: app.checkUpdates()
+                }
+                GlassButton {
+                    visible: app.appUpdateReady
+                    text: panel.tr("settings.appUpdate.viewRelease", "View release")
+                    onClicked: app.openUpdate()
+                }
             }
             SubHead { title: panel.tr("settings.integrations.title", "Integrations") }
             SettingRow {
@@ -1079,6 +1089,66 @@ Flickable {
                     onPicked: function(v) { app.updateSetting("modelRankingMetric", v) }
                 }
             }
+            // Electron rate mode: a manual override is just a value in
+            // currencyRates; deleting the key returns the code to auto.
+            SettingRow {
+                visible: (app.settings.currency || "USD") !== "USD"
+                label: panel.tr("settings.currency.rateMode", "Exchange rate mode")
+                PillRow {
+                    labels: [panel.tr("settings.currency.modeAuto", "Auto"), panel.tr("settings.currency.modeManual", "Manual")]
+                    values: ["auto", "manual"]
+                    current: Number(app.settings.currencyRates && app.settings.currencyRates[app.settings.currency]) > 0 ? "manual" : "auto"
+                    onPicked: function(v) {
+                        var rates = Object.assign({}, app.settings.currencyRates || {})
+                        if (v === "manual") {
+                            var eff = Number(rates[app.settings.currency]) || 1
+                            rates[app.settings.currency] = eff
+                        } else {
+                            delete rates[app.settings.currency]
+                        }
+                        app.updateSetting("currencyRates", rates)
+                    }
+                }
+            }
+            TextField {
+                visible: (app.settings.currency || "USD") !== "USD"
+                         && Number(app.settings.currencyRates && app.settings.currencyRates[app.settings.currency]) > 0
+                width: parent.width
+                placeholderText: panel.tr("settings.currency.ratePlaceholder", "Rate per 1 USD")
+                text: {
+                    var v = Number(app.settings.currencyRates && app.settings.currencyRates[app.settings.currency])
+                    return isFinite(v) && v > 0 ? String(Number(v.toFixed(v >= 1 ? 2 : 4))) : ""
+                }
+                color: Theme.text
+                font.pixelSize: 11
+                font.family: Theme.fontFamily
+                onEditingFinished: {
+                    var rates = Object.assign({}, app.settings.currencyRates || {})
+                    var num = Number(text)
+                    if (isFinite(num) && num > 0) rates[app.settings.currency] = num
+                    else delete rates[app.settings.currency]
+                    app.updateSetting("currencyRates", rates)
+                }
+                background: Rectangle { radius: 8; color: Qt.rgba(1, 1, 1, 0.05); border.color: Theme.line; border.width: 1 }
+            }
+            SettingRow {
+                label: panel.tr("settings.home.limitAccounts", "Home limit accounts")
+                GlassCombo {
+                    model: ["1", "2", "3", "4", "5", "6"]
+                    property var values: [1, 2, 3, 4, 5, 6]
+                    currentIndex: Math.max(0, values.indexOf(Number(app.settings.homeLimitAccountCount || 3)))
+                    onActivated: app.updateSetting("homeLimitAccountCount", values[currentIndex])
+                }
+            }
+            SettingRow {
+                label: panel.tr("settings.home.activeDaysWindow", "Active days window")
+                PillRow {
+                    labels: [panel.tr("settings.home.activeDaysAll", "All"), panel.tr("settings.home.activeDaysYear", "Past year")]
+                    values: ["all", "year"]
+                    current: app.settings.homeActiveDaysWindow || "all"
+                    onPicked: function(v) { app.updateSetting("homeActiveDaysWindow", v) }
+                }
+            }
         }
     }
 
@@ -1115,6 +1185,32 @@ Flickable {
                 }
             }
             SettingRow {
+                label: panel.tr("settings.display.trayText", "Tray display")
+                GlassCombo {
+                    model: [
+                        panel.tr("settings.tray.tokens", "Today tokens"),
+                        panel.tr("settings.tray.cost", "Today cost"),
+                        panel.tr("settings.tray.both", "Today tokens & cost"),
+                        panel.tr("settings.tray.tokensAll", "Total tokens"),
+                        panel.tr("settings.tray.costAll", "Total cost"),
+                        panel.tr("settings.tray.bothAll", "Total tokens & cost"),
+                        panel.tr("settings.tray.limitsAllSessions", "AI tool limits"),
+                        panel.tr("settings.tray.icon", "App icon only")
+                    ]
+                    property var values: ["tokens", "cost", "both", "tokensAll", "costAll", "bothAll", "limitsAllSessions", "icon"]
+                    currentIndex: Math.max(0, values.indexOf(app.settings.trayContent || "tokens"))
+                    onActivated: app.updateSetting("trayContent", values[currentIndex])
+                }
+            }
+            SettingRow {
+                label: panel.tr("settings.display.hideAppIcon", "Hide app icon")
+                desc: panel.tr("settings.display.hideAppIconNote", "Keep the widget off the taskbar and Alt+Tab; the tray stays the launcher.")
+                SwitchToggle {
+                    checked: !!app.settings.hideAppIcon
+                    onToggled: function(on) { app.updateSetting("hideAppIcon", on) }
+                }
+            }
+            SettingRow {
                 label: panel.tr("settings.display.topEdgeHide", "Top-edge hide")
                 SwitchToggle {
                     checked: !!app.settings.topEdgeHideEnabled
@@ -1126,6 +1222,16 @@ Flickable {
                 SwitchToggle {
                     checked: !!app.settings.floatingBubbleEnabled
                     onToggled: function(on) { app.updateSetting("floatingBubbleEnabled", on) }
+                }
+            }
+            SettingRow {
+                visible: !!app.settings.floatingBubbleEnabled
+                label: panel.tr("settings.display.floatingBubbleContent", "Bubble content")
+                PillRow {
+                    labels: [panel.tr("settings.bubble.icon", "Icon"), panel.tr("settings.bubble.tokens", "Tokens")]
+                    values: ["icon", "tokens"]
+                    current: app.settings.floatingBubbleContent || "tokens"
+                    onPicked: function(v) { app.updateSetting("floatingBubbleContent", v) }
                 }
             }
         }
@@ -1254,6 +1360,64 @@ Flickable {
                     values: ["system", "on", "off"]
                     current: app.settings.reduceMotion || "system"
                     onPicked: function(v) { app.updateSetting("reduceMotion", v) }
+                }
+            }
+            // Electron fontSettings: presets resolve to a CSS family list —
+            // 'app' keeps the built-in stack, system/mono pick a concrete
+            // family, custom stores the typed list verbatim.
+            SettingRow {
+                label: panel.tr("settings.appearance.fontInterface", "Interface font")
+                GlassCombo {
+                    model: [
+                        panel.tr("settings.appearance.fontPresetApp", "App default"),
+                        panel.tr("settings.appearance.fontPresetSystem", "System"),
+                        panel.tr("settings.appearance.fontPresetMono", "Monospace"),
+                        panel.tr("settings.appearance.fontPresetCustom", "Custom")
+                    ]
+                    property string current: app.settings.interfaceFontFamily || ""
+                    property int presetIndex: current.length === 0 ? 0
+                        : current === "Segoe UI" ? 1
+                        : current.indexOf("Consolas") >= 0 ? 2
+                        : 3
+                    currentIndex: Math.max(0, presetIndex)
+                    onActivated: {
+                        if (currentIndex === 0) app.updateSetting("interfaceFontFamily", "")
+                        else if (currentIndex === 1) app.updateSetting("interfaceFontFamily", "Segoe UI")
+                        else if (currentIndex === 2) app.updateSetting("interfaceFontFamily", "Consolas, Cascadia Mono, Cascadia Code")
+                        // Custom keeps the field open; the text field below writes it.
+                    }
+                }
+            }
+            TextField {
+                visible: (app.settings.interfaceFontFamily || "").length > 0
+                         && app.settings.interfaceFontFamily !== "Segoe UI"
+                         && app.settings.interfaceFontFamily.indexOf("Consolas") < 0
+                width: parent.width
+                placeholderText: panel.tr("settings.appearance.fontCustomLabel", "Custom font family list")
+                text: app.settings.interfaceFontFamily || ""
+                color: Theme.text
+                font.pixelSize: 11
+                font.family: Theme.fontFamily
+                onEditingFinished: app.updateSetting("interfaceFontFamily", text)
+                background: Rectangle { radius: 8; color: Qt.rgba(1, 1, 1, 0.05); border.color: Theme.line; border.width: 1 }
+            }
+            SettingRow {
+                label: panel.tr("settings.appearance.fontDisplay", "Display font")
+                GlassCombo {
+                    model: [
+                        panel.tr("settings.appearance.fontPresetFollow", "Follow interface"),
+                        panel.tr("settings.appearance.fontPresetSystem", "System"),
+                        panel.tr("settings.appearance.fontPresetCustom", "Custom")
+                    ]
+                    property string current: app.settings.displayFontFamily || ""
+                    property int presetIndex: current.length === 0 || current === "ui-monospace" ? 0
+                        : current === "Segoe UI" ? 1
+                        : 2
+                    currentIndex: Math.max(0, presetIndex)
+                    onActivated: {
+                        if (currentIndex === 0) app.updateSetting("displayFontFamily", "")
+                        else if (currentIndex === 1) app.updateSetting("displayFontFamily", "Segoe UI")
+                    }
                 }
             }
             Item { width: parent.width; height: 6 }
@@ -1483,6 +1647,35 @@ Flickable {
             }
             SettingRow {
                 hairline: true
+                label: panel.tr("settings.collection.mode.label", "Collection mode")
+                desc: panel.tr("settings.collection.modeDesc", "Live watches tool data and refreshes; smart backs off to a fixed cadence; interval runs on the schedule alone.")
+                GlassCombo {
+                    model: [
+                        panel.tr("settings.collection.mode.live", "Live (watch + interval)"),
+                        panel.tr("settings.collection.mode.smart", "Smart (watch + fixed cadence)"),
+                        panel.tr("settings.collection.mode.interval", "Interval only")
+                    ]
+                    property var values: ["live", "smart", "interval"]
+                    currentIndex: Math.max(0, values.indexOf(app.settings.collectionMode || "live"))
+                    onActivated: app.updateSetting("collectionMode", values[currentIndex])
+                }
+            }
+            SettingRow {
+                visible: (app.settings.collectionMode || "live") !== "smart"
+                label: panel.tr("settings.collection.cadence", "Collection cadence")
+                GlassCombo {
+                    model: [
+                        panel.tr("settings.collection.interval.5m", "Every 5 minutes"),
+                        panel.tr("settings.collection.interval.15m", "Every 15 minutes"),
+                        panel.tr("settings.collection.interval.30m", "Every 30 minutes")
+                    ]
+                    property var values: [300000, 900000, 1800000]
+                    currentIndex: Math.max(0, values.indexOf(Number(app.settings.collectionIntervalMs || 300000)))
+                    onActivated: app.updateSetting("collectionIntervalMs", values[currentIndex])
+                }
+            }
+            SettingRow {
+                hairline: true
                 label: panel.tr("settings.collection.wslScan", "Scan tools inside WSL")
                 SwitchToggle {
                     checked: app.settings.wslScanEnabled !== false
@@ -1503,6 +1696,41 @@ Flickable {
                     onToggled: function(on) { app.updateSetting("projectsEnabled", on) }
                 }
             }
+            SettingRow {
+                label: panel.tr("settings.export.autoLabel", "Auto export")
+                desc: panel.tr("settings.export.desc", "Write the CSV + JSON snapshot to the export folder on a fixed interval.")
+                SwitchToggle {
+                    checked: !!app.settings.exportAutoEnabled
+                    onToggled: function(on) { app.updateSetting("exportAutoEnabled", on) }
+                }
+            }
+            SettingRow {
+                visible: !!app.settings.exportAutoEnabled
+                label: panel.tr("settings.export.interval", "Export interval")
+                GlassCombo {
+                    model: ["1 min", "5 min", "15 min", "30 min", "60 min"]
+                    property var values: [60000, 300000, 900000, 1800000, 3600000]
+                    currentIndex: Math.max(0, values.indexOf(Number(app.settings.exportIntervalMs || 60000)))
+                    onActivated: app.updateSetting("exportIntervalMs", values[currentIndex])
+                }
+            }
+            SettingRow {
+                visible: !!app.settings.exportAutoEnabled
+                label: panel.tr("settings.export.dir", "Export folder")
+                GlassButton {
+                    text: panel.tr("settings.export.pickDir", "Choose…")
+                    onClicked: app.pickExportDir()
+                }
+            }
+            Text {
+                visible: !!app.settings.exportAutoEnabled && String(app.settings.exportDir || "").length > 0
+                width: parent.width
+                text: app.settings.exportDir || ""
+                color: Theme.muted
+                font.pixelSize: 10
+                font.family: Theme.fontFamily
+                elide: Text.ElideMiddle
+            }
             GlassButton { text: panel.tr("settings.export.now", "Export now"); onClicked: app.exportNow() }
             GlassButton { text: panel.tr("settings.about.diagnostics.generate", "Generate report"); onClicked: app.exportDiagnostics() }
         }
@@ -1514,6 +1742,34 @@ Flickable {
             id: lim
             property string query: ""
             property var rows: []
+            // Per-provider credential fields, mirroring Electron's account
+            // accordions (key names = CREDENTIAL_SETTING_PATHS in both apps).
+            property var credentialFields: ({
+                claude: [{ key: "claudeWebCookie", label: "Web Cookie", secret: true }],
+                deepseek: [{ key: "deepseekApiKey", label: "API Key", secret: true }],
+                minimax: [{ key: "minimaxApiKey", label: "API Key", secret: true }],
+                kimi: [{ key: "kimiApiKey", label: "API Key", secret: true }, { key: "kimiWebAccessToken", label: "Web Access Token", secret: true }],
+                copilot: [{ key: "copilotApiToken", label: "API Token", secret: true }, { key: "copilotEnterpriseHost", label: "Enterprise Host", secret: false }],
+                zai: [{ key: "zaiApiKey", label: "API Key", secret: true }],
+                zaiteam: [{ key: "zaiTeamApiKey", label: "Team API Key", secret: true }, { key: "zaiTeamOrganizationId", label: "Organization ID", secret: false }, { key: "zaiTeamProjectId", label: "Project ID", secret: false }],
+                volcengine: [{ key: "volcengineAccessKeyId", label: "Access Key ID", secret: true }, { key: "volcengineSecretAccessKey", label: "Secret Access Key", secret: true }, { key: "volcengineAgentAccessKeyId", label: "Agent Access Key ID", secret: true }, { key: "volcengineAgentSecretAccessKey", label: "Agent Secret Access Key", secret: true }],
+                alibaba: [{ key: "alibabaCookie", label: "Cookie", secret: true }],
+                qoder: [{ key: "qoderCookie", label: "Cookie", secret: true }],
+                trae: [{ key: "traeAccessToken", label: "Access Token", secret: true }, { key: "traeDeviceId", label: "Device ID", secret: false }],
+                zed: [{ key: "zedCookie", label: "Cookie", secret: true }],
+                commandcode: [{ key: "commandcodeCookie", label: "Cookie", secret: true }],
+                ollama: [{ key: "ollamaCookie", label: "Cookie", secret: true }],
+                opencode: [{ key: "opencodeCookie", label: "Cookie", secret: true }]
+            })
+            function credentialIsSet(key) {
+                return String(app.settings[key] || "") === "set"
+            }
+            function credentialsSet(id) {
+                var fields = credentialFields[id] || []
+                for (var i = 0; i < fields.length; ++i)
+                    if (credentialIsSet(String(fields[i].key))) return true
+                return false
+            }
             function tagText(t) {
                 var lang = String(app.i18n.resolvedLanguage || "")
                 if (lang.indexOf("zh") === 0) {
@@ -1631,6 +1887,121 @@ Flickable {
                 SwitchToggle {
                     checked: !!app.settings.showLimitSource
                     onToggled: function(on) { app.updateSetting("showLimitSource", on) }
+                }
+            }
+            SettingRow {
+                label: panel.tr("settings.limits.showUsed", "Show used instead of remaining")
+                SwitchToggle {
+                    checked: !!app.settings.showLimitUsed
+                    onToggled: function(on) { app.updateSetting("showLimitUsed", on) }
+                }
+            }
+            SettingRow {
+                label: panel.tr("settings.limits.refreshMode", "Refresh mode")
+                PillRow {
+                    labels: [panel.tr("settings.limits.refreshFixed", "Fixed"), panel.tr("settings.limits.refreshAdaptive", "Adaptive")]
+                    values: ["fixed", "adaptive"]
+                    current: app.settings.limitsRefreshMode || "fixed"
+                    onPicked: function(v) { app.updateSetting("limitsRefreshMode", v) }
+                }
+            }
+            SettingRow {
+                label: panel.tr("settings.limits.refreshInterval", "Refresh interval")
+                GlassCombo {
+                    model: ["1 min", "2 min", "5 min", "15 min", "30 min"]
+                    property var values: [60000, 120000, 300000, 900000, 1800000]
+                    currentIndex: Math.max(0, values.indexOf(Number(app.settings.limitsRefreshMs || 300000)))
+                    onActivated: app.updateSetting("limitsRefreshMs", values[currentIndex])
+                }
+            }
+            // Electron's per-provider account accordions, condensed: the fields
+            // each provider's collector reads, saved straight into the shared
+            // credential store. Login-flow providers (Codex OAuth, Cursor
+            // multi-account, MiMo managed accounts) stay env/CLI-managed.
+            Repeater {
+                model: {
+                    var out = []
+                    var all = app.catalogLimitRows()
+                    for (var i = 0; i < all.length; ++i) {
+                        var id = String(all[i].id || "")
+                        if (lim.credentialFields[id]) out.push(all[i])
+                    }
+                    return out
+                }
+                delegate: Column {
+                    width: parent.width
+                    spacing: 6
+                    property var fields: lim.credentialFields[String(modelData.id)] || []
+                    property bool expanded: false
+                    Item {
+                        width: parent.width
+                        height: 24
+                        Text {
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: (modelData.label || modelData.id) + " · " + panel.tr("settings.limits.credentials", "Credentials")
+                            color: Theme.muted
+                            font.pixelSize: 10
+                            font.family: Theme.fontFamily
+                        }
+                        Row {
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 6
+                            Rectangle {
+                                visible: lim.credentialsSet(String(modelData.id))
+                                width: 6; height: 6; radius: 3
+                                color: Theme.accent
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            Text {
+                                text: expanded ? "▴" : "▾"
+                                color: Theme.muted
+                                font.pixelSize: 10
+                            }
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: expanded = !expanded
+                        }
+                    }
+                    Column {
+                        visible: expanded
+                        width: parent.width
+                        spacing: 6
+                        Repeater {
+                            model: fields
+                            delegate: Column {
+                                width: parent.width
+                                spacing: 3
+                                property var field: modelData
+                                property string draft: ""
+                                Text {
+                                    text: field.label
+                                    color: Theme.muted
+                                    font.pixelSize: 10
+                                    font.family: Theme.fontFamily
+                                }
+                                TextField {
+                                    width: parent.width
+                                    echoMode: field.secret ? TextInput.Password : TextInput.Normal
+                                    placeholderText: lim.credentialIsSet(String(field.key))
+                                        ? panel.tr("settings.limits.credentialSet", "Saved — type to replace")
+                                        : panel.tr("settings.limits.credentialEmpty", "Not set")
+                                    text: draft
+                                    color: Theme.text
+                                    font.pixelSize: 11
+                                    font.family: Theme.fontFamily
+                                    onEditingFinished: {
+                                        app.updateSetting(String(field.key), text)
+                                        draft = ""
+                                    }
+                                    background: Rectangle { radius: 8; color: Qt.rgba(1, 1, 1, 0.05); border.color: Theme.line; border.width: 1 }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

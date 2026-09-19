@@ -8,6 +8,7 @@
 #include <QQuickWindow>
 #include <QScreen>
 #include <QTimer>
+#include <QVariantAnimation>
 
 #ifdef Q_OS_WIN
 #  include <windows.h>
@@ -15,13 +16,27 @@
 
 namespace tmon {
 
+// Electron topEdgeHide.js: hide/show the docked window over 240ms — hide eases
+// in (sucked toward the top), show eases out (the bottom extends downward).
+// A 6px peek stays hoverable and the hide itself is debounced 150ms so a
+// pointer grazing the bottom edge does not dock the widget.
+namespace {
+constexpr int kTopEdgePeekPx = 6;
+constexpr int kTopEdgeAnimationMs = 240;
+constexpr int kTopEdgeHideDebounceMs = 150;
+}
+
 WidgetWindow::WidgetWindow(QWindow *window, QObject *parent)
     : QObject(parent)
     , m_window(window)
     , m_edgeTimer(new QTimer(this))
+    , m_dockDebounce(new QTimer(this))
 {
     m_edgeTimer->setInterval(80);
     connect(m_edgeTimer, &QTimer::timeout, this, &WidgetWindow::pollCursor);
+    m_dockDebounce->setSingleShot(true);
+    m_dockDebounce->setInterval(kTopEdgeHideDebounceMs);
+    connect(m_dockDebounce, &QTimer::timeout, this, [this]() { dockTopEdge(true); });
 }
 
 WidgetWindow::~WidgetWindow()
@@ -53,7 +68,7 @@ bool WidgetWindow::nativeEventFilter(const QByteArray &eventType, void *message,
     return false;
 }
 
-void WidgetWindow::applyChrome(const QString &behavior, const QString &backdrop, int opacity, int blur, bool keepAboveTaskbar)
+void WidgetWindow::applyChrome(const QString &behavior, const QString &backdrop, int opacity, int blur, bool keepAboveTaskbar, bool hideAppIcon)
 {
     if (!m_window) return;
     m_window->setFlag(Qt::FramelessWindowHint, true);
@@ -69,11 +84,25 @@ void WidgetWindow::applyChrome(const QString &behavior, const QString &backdrop,
     const bool desktop = behavior == QLatin1String("desktop");
     setAlwaysOnTop(m_window, floating, keepAboveTaskbar);
     m_window->setFlag(Qt::WindowTransparentForInput, desktop);
+    // Electron hideAppIcon: keep the window off the taskbar/alt-tab. Qt::Tool
+    // is the window-type bit for that; clearing it must restore the plain
+    // Qt::Window type — Tool's flag mask contains the Window bit, so an
+    // unconditional setFlag(Qt::Tool, false) leaves a handle-less Widget.
+    if (hideAppIcon)
+        m_window->setFlag(Qt::Tool, true);
+    else {
+        m_window->setFlag(Qt::Tool, false);
+        m_window->setFlag(Qt::Window, true);
+    }
     applyAcrylic(m_window, backdrop, opacity, blur);
 #ifdef Q_OS_WIN
     const HWND hwnd = reinterpret_cast<HWND>(m_window->winId());
     const LONG style = GetWindowLongW(hwnd, GWL_STYLE);
     SetWindowLongW(hwnd, GWL_STYLE, style | WS_THICKFRAME | WS_MINIMIZEBOX);
+    LONG exStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    if (hideAppIcon) exStyle |= WS_EX_TOOLWINDOW;
+    else exStyle &= ~WS_EX_TOOLWINDOW;
+    SetWindowLongW(hwnd, GWL_EXSTYLE, exStyle);
     SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     const QSize client = m_window->size();
@@ -110,6 +139,7 @@ void WidgetWindow::hideWindow()
 void WidgetWindow::showWindow()
 {
     if (!m_window) return;
+    stopYAnimation();
     if (m_topHidden) {
         m_window->setY(m_restY);
         m_topHidden = false;
@@ -123,16 +153,19 @@ void WidgetWindow::dockTopEdge(bool docked)
 {
     if (!m_window) return;
     if (!docked) {
+        m_dockDebounce->stop();
         if (m_topHidden) {
+            stopYAnimation();
             m_window->setY(m_restY);
             m_topHidden = false;
         }
         return;
     }
     if (!m_topHidden) m_restY = m_window->y();
-    const int hideY = 4 - m_window->height();
-    m_window->setY(hideY);
+    const int screenTop = m_window->screen() ? m_window->screen()->geometry().top() : 0;
+    const int hideY = screenTop - m_window->height() + kTopEdgePeekPx;
     m_topHidden = true;
+    animateWindowY(hideY, true);
 }
 
 void WidgetWindow::setTopEdgeEnabled(bool on)
@@ -140,11 +173,36 @@ void WidgetWindow::setTopEdgeEnabled(bool on)
     m_topEdgeEnabled = on;
     if (!on) {
         m_edgeTimer->stop();
+        m_dockDebounce->stop();
         dockTopEdge(false);
         return;
     }
     if (m_window) m_restY = m_window->y();
     m_edgeTimer->start();
+}
+
+void WidgetWindow::animateWindowY(int targetY, bool hiding)
+{
+    if (!m_window || m_window->y() == targetY) return;
+    stopYAnimation();
+    m_yAnimation = new QVariantAnimation(this);
+    m_yAnimation->setStartValue(m_window->y());
+    m_yAnimation->setEndValue(targetY);
+    m_yAnimation->setDuration(kTopEdgeAnimationMs);
+    m_yAnimation->setEasingCurve(hiding ? QEasingCurve::InCubic : QEasingCurve::OutCubic);
+    connect(m_yAnimation, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) {
+        if (m_window) m_window->setY(v.toInt());
+    });
+    m_yAnimation->start(QAbstractAnimation::DeleteWhenStopped);
+}
+
+void WidgetWindow::stopYAnimation()
+{
+    if (m_yAnimation) {
+        m_yAnimation->stop();
+        m_yAnimation->deleteLater();
+        m_yAnimation = nullptr;
+    }
 }
 
 void WidgetWindow::pollCursor()
@@ -154,14 +212,18 @@ void WidgetWindow::pollCursor()
     const auto geo = m_window->geometry();
     const int screenTop = m_window->screen() ? m_window->screen()->geometry().top() : 0;
     if (m_topHidden) {
-        if (pos.y() <= screenTop + 6 && pos.x() >= geo.x() && pos.x() <= geo.x() + geo.width()) {
-            m_window->setY(m_restY);
+        if (pos.y() <= screenTop + kTopEdgePeekPx && pos.x() >= geo.x() && pos.x() <= geo.x() + geo.width()) {
             m_topHidden = false;
+            animateWindowY(m_restY, false);
         }
         return;
     }
-    if (pos.y() > geo.bottom() + 24 && geo.y() <= screenTop + 8)
-        dockTopEdge(true);
+    const bool cursorLeaving = pos.y() > geo.bottom() + 24;
+    if (cursorLeaving && geo.y() <= screenTop + 8) {
+        if (!m_dockDebounce->isActive()) m_dockDebounce->start();
+        return;
+    }
+    m_dockDebounce->stop();
 }
 
 } // namespace tmon

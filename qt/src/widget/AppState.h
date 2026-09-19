@@ -49,9 +49,14 @@ class AppState : public QObject {
     Q_PROPERTY(bool appUpdateReady READ appUpdateReady NOTIFY appUpdateChanged)
     Q_PROPERTY(QString appUpdateLabel READ appUpdateLabel NOTIFY appUpdateChanged)
     Q_PROPERTY(QString appUpdateUrl READ appUpdateUrl NOTIFY appUpdateChanged)
+    Q_PROPERTY(QString appUpdateLatest READ appUpdateLatest NOTIFY appUpdateChanged)
     Q_PROPERTY(QVariantMap dashboardSummary READ dashboardSummary NOTIFY statsChanged)
     Q_PROPERTY(QVariantList dashboardToolRows READ dashboardToolRows NOTIFY statsChanged)
     Q_PROPERTY(QVariantList dashboardModelRows READ dashboardModelRows NOTIFY statsChanged)
+    Q_PROPERTY(bool fixedPeriodActive READ fixedPeriodActive NOTIFY periodChanged)
+    Q_PROPERTY(bool fixedPeriodReady READ fixedPeriodReady NOTIFY statsChanged)
+    Q_PROPERTY(QStringList fixedPeriodRange READ fixedPeriodRange NOTIFY statsChanged)
+    Q_PROPERTY(QString periodTabLabel READ periodTabLabel NOTIFY periodChanged)
     Q_PROPERTY(QVariantMap theme READ theme NOTIFY settingsChanged)
     Q_PROPERTY(I18n *i18n READ i18n CONSTANT)
     Q_PROPERTY(bool bubbleCollapsed READ bubbleCollapsed WRITE setBubbleCollapsed NOTIFY bubbleChanged)
@@ -130,6 +135,7 @@ public:
     Q_INVOKABLE void setChromeHover(bool on);
     Q_INVOKABLE void setUtilityHover(bool on);
     Q_INVOKABLE void setView(const QString &view);
+    Q_INVOKABLE void setViewFromHome(const QString &view);
     Q_INVOKABLE void cycleView();
     Q_INVOKABLE void forceView(const QString &view);
     Q_INVOKABLE void setPeriod(const QString &period);
@@ -139,6 +145,7 @@ public:
     Q_INVOKABLE void cycleBehavior();
     Q_INVOKABLE void exportNow();
     Q_INVOKABLE void exportDiagnostics();
+    Q_INVOKABLE void pickExportDir();
     Q_INVOKABLE void checkUpdates();
     Q_INVOKABLE void setBubbleCollapsed(bool on);
     Q_INVOKABLE QString formatTokens(double tokens) const;
@@ -176,10 +183,18 @@ public:
     Q_INVOKABLE void showDashboard();
     bool appUpdateReady() const { return m_appUpdateReady; }
     QString appUpdateLabel() const { return m_appUpdateLabel; }
+    // "↑ v1.2.3" → "v1.2.3"; empty until a check answers.
+    QString appUpdateLatest() const { return m_appUpdateReady && m_appUpdateLabel.startsWith(QStringLiteral("↑ ")) ? m_appUpdateLabel.mid(2) : QString(); }
     QString appUpdateUrl() const { return m_appUpdateUrl; }
     QVariantMap dashboardSummary() const { return m_dashboardSummary; }
     QVariantList dashboardToolRows() const { return m_dashboardToolRows; }
     QVariantList dashboardModelRows() const { return m_dashboardModelRows; }
+    // Fixed headline ranges (本周 / 最近 7 天 / 最近 30 天) are derived from the
+    // daily history rather than scanned; mirror Electron fixedPeriodRanges.
+    bool fixedPeriodActive() const;
+    bool fixedPeriodReady() const { return m_derivedReady; }
+    QStringList fixedPeriodRange() const;
+    QString periodTabLabel() const;
     WidgetWindow *windowChrome() { return m_window; }
     TrayController *tray() { return &m_tray; }
     Hotkey *hotkey() { return &m_hotkey; }
@@ -203,6 +218,9 @@ signals:
 
 private:
     void rebuildRows();
+    void rebuildDerivedPeriod();
+    void navigate(const QString &view, bool fromHome);
+    void rebuildTrayMenu();
     void applyTheme();
     void persist();
     void ensureCurrencyRate();
@@ -231,6 +249,11 @@ private:
     QVariantList m_dashboardToolRows, m_dashboardModelRows;
     QVariantMap m_dashboardSummary;
     QVariantMap m_healthCounts;
+    QJsonObject m_derivedPeriod;
+    QStringList m_derivedRange;
+    bool m_derivedReady = false;
+    QTimer *m_exportTimer = nullptr;
+    qint64 m_lastExportAt = 0;
     QString m_view = QStringLiteral("tool");
     QString m_period = QStringLiteral("today");
     QString m_status = QStringLiteral("Starting");

@@ -50,26 +50,16 @@ Flickable {
                         anchors.top: parent.top
                         anchors.topMargin: 1
                     }
-                    Column {
+                    Text {
                         width: parent.width - 20 - rightMeta.width - 16
-                        spacing: 2
-                        Text {
-                            text: provider.row.label
-                            color: Theme.text
-                            font.pixelSize: 12
-                            font.weight: Font.Normal
-                            font.family: Theme.fontFamily
-                            elide: Text.ElideRight
-                            width: parent.width
-                        }
-                        Text {
-                            visible: String(provider.row.status || "") !== "notConfigured"
-                                     && (provider.row.updatedText || "").length > 0
-                            text: provider.row.updatedText || ""
-                            color: Theme.muted
-                            font.pixelSize: 10
-                            font.family: Theme.fontFamily
-                        }
+                        text: provider.row.label
+                        color: Theme.text
+                        font.pixelSize: 12
+                        font.weight: Font.Normal
+                        font.family: Theme.fontFamily
+                        elide: Text.ElideRight
+                        anchors.top: parent.top
+                        anchors.topMargin: 1
                     }
                     Text {
                         id: rightMeta
@@ -80,6 +70,19 @@ Flickable {
                         anchors.top: parent.top
                         anchors.topMargin: 1
                     }
+                }
+                // Electron .limit-title puts the meta line at the block's left
+                // edge (x=0), aligned with the window labels below — not after
+                // the provider mark.
+                Text {
+                    visible: String(provider.row.status || "") !== "notConfigured"
+                             && (provider.row.updatedText || "").length > 0
+                    width: parent.width
+                    text: provider.row.updatedText || ""
+                    color: Theme.muted
+                    font.pixelSize: 10
+                    font.family: Theme.fontFamily
+                    elide: Text.ElideRight
                 }
 
                 Column {

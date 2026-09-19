@@ -124,7 +124,31 @@ Item {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: menu.visible = !menu.visible
+                            onClicked: {
+                                hoverClose.stop()
+                                menu.visible = !menu.visible
+                            }
+                            // Electron disclosure pointerenter: hovering the
+                            // chevron opens the menu (mouse only); leaving the
+                            // whole switcher closes it after 160ms.
+                            onContainsMouseChanged: {
+                                if (containsMouse) {
+                                    hoverClose.stop()
+                                    menu.visible = true
+                                } else if (menu.visible) {
+                                    hoverClose.restart()
+                                }
+                            }
+                        }
+                        Timer {
+                            id: hoverClose
+                            interval: 160
+                            onTriggered: {
+                                // Moving into the popup itself keeps it open.
+                                if (menu.visible && !menuHover.containsMouse && !switcherHover.containsMouse
+                                    && !currentHover.containsMouse)
+                                    menu.visible = false
+                            }
                         }
                     }
                 }
@@ -132,21 +156,47 @@ Item {
             Popup {
                 id: menu
                 y: -implicitHeight - 6
-                width: 168
-                padding: 6
+                // Electron .view-switcher-menu is width:100% of the switcher
+                // (button + disclosure), not a fixed wider panel.
+                width: switcher.width
+                padding: 4
+                // Electron .view-switcher-menu: opens upward from the button with
+                // a 190ms ease-out fade/rise, closes in 130ms.
+                transformOrigin: Item.BottomLeft
+                enter: Transition {
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 190; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "scale"; from: 0.985; to: 1; duration: 190; easing.type: Easing.OutCubic }
+                }
+                exit: Transition {
+                    NumberAnimation { property: "opacity"; from: 1; to: 0; duration: 130; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "scale"; from: 1; to: 0.985; duration: 130; easing.type: Easing.OutCubic }
+                }
                 background: Rectangle {
                     radius: 10
                     color: Theme.glass
                     border.color: Qt.rgba(1, 1, 1, 0.08)
+                    // QQuickPopup is not a Control and has no hover reporting of
+                    // its own; this area is what keeps the menu open while the
+                    // pointer travels up from the chevron into the list.
+                    MouseArea {
+                        id: menuHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        acceptedButtons: Qt.NoButton
+                        onContainsMouseChanged: {
+                            if (containsMouse) hoverClose.stop()
+                            else if (menu.visible) hoverClose.restart()
+                        }
+                    }
                 }
                 Column {
                     spacing: 2
                     Repeater {
                         model: app.views
                         delegate: Rectangle {
-                            width: 156
+                            width: menu.availableWidth
                             height: 28
-                            radius: 6
+                            radius: 5
                             color: modelData === app.view ? Qt.rgba(0.72, 0.92, 0.83, 0.12) : "transparent"
                             Row {
                                 anchors.verticalCenter: parent.verticalCenter

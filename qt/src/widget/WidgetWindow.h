@@ -5,6 +5,7 @@
 #include <QObject>
 #include <QWindow>
 
+class QVariantAnimation;
 class QTimer;
 
 namespace tmon {
@@ -14,7 +15,7 @@ class WidgetWindow : public QObject, public QAbstractNativeEventFilter {
 public:
     explicit WidgetWindow(QWindow *window, QObject *parent = nullptr);
     ~WidgetWindow() override;
-    Q_INVOKABLE void applyChrome(const QString &behavior, const QString &backdrop, int opacity, int blur, bool keepAboveTaskbar);
+    Q_INVOKABLE void applyChrome(const QString &behavior, const QString &backdrop, int opacity, int blur, bool keepAboveTaskbar, bool hideAppIcon = false);
     Q_INVOKABLE void startMove();
     Q_INVOKABLE void startResize(Qt::Edges edges);
     Q_INVOKABLE void minimize();
@@ -28,8 +29,12 @@ public:
 
 private:
     void pollCursor();
+    void animateWindowY(int targetY, bool hiding);
+    void stopYAnimation();
     QWindow *m_window = nullptr;
     QTimer *m_edgeTimer = nullptr;
+    QTimer *m_dockDebounce = nullptr;
+    QVariantAnimation *m_yAnimation = nullptr;
     bool m_topHidden = false;
     bool m_topEdgeEnabled = false;
     int m_restY = 0;

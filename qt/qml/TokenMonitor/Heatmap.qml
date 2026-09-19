@@ -182,6 +182,8 @@ Item {
             spacing: 2
             Text {
                 id: tipTokens
+                anchors.horizontalCenter: parent.horizontalCenter
+                horizontalAlignment: Text.AlignHCenter
                 color: Theme.text
                 font.pixelSize: 11
                 font.weight: Font.DemiBold
@@ -189,6 +191,8 @@ Item {
             }
             Text {
                 id: tipDate
+                anchors.horizontalCenter: parent.horizontalCenter
+                horizontalAlignment: Text.AlignHCenter
                 color: Theme.muted
                 font.pixelSize: 10
                 font.family: Theme.fontFamily

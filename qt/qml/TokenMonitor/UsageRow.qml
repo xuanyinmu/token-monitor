@@ -31,6 +31,7 @@ Item {
             Row {
                 width: parent.width - metrics.width - 10
                 spacing: 8
+                anchors.verticalCenter: parent.verticalCenter
                 TintIcon {
                     visible: row.icon.length > 0
                     anchors.verticalCenter: parent.verticalCenter
@@ -105,7 +106,8 @@ Item {
                             Text {
                                 id: youLab
                                 anchors.centerIn: parent
-                                text: "you"
+                                // Electron .row.local::after uppercases via CSS.
+                                text: "YOU"
                                 color: Theme.muted
                                 font.pixelSize: 9
                                 font.family: Theme.fontFamily
@@ -179,6 +181,7 @@ Item {
 
             Column {
                 id: metrics
+                anchors.verticalCenter: parent.verticalCenter
                 Text {
                     text: row.value
                     color: Theme.text

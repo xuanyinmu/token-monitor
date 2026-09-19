@@ -28,11 +28,19 @@ Flickable {
         for (var i = 0; i < list.length; ++i) {
             var r = list[i]
             if (String(r.status || "") === "notConfigured") continue
-            var windows = r.homeWindows || r.windows || []
+            var windows = (r.homeWindows && r.homeWindows.length > 0) ? r.homeWindows : (r.windows || [])
             if (windows.length === 0 && !(r.percent > 0) && !r.detail) continue
-            out.push(r)
+            // Electron homeLimitAccounts sorts by the account's lowest remaining
+            // window (configured order wins only when the user set one).
+            var low = 1
+            for (var j = 0; j < windows.length; ++j) {
+                var frac = remainFrac(windows[j].remainingPercent)
+                if (frac < low) low = frac
+            }
+            out.push({ row: r, low: low })
         }
-        return out
+        out.sort(function(a, b) { return a.low - b.low })
+        return out.map(function(entry) { return entry.row })
     }
 
     function remainFrac(v) {
@@ -59,7 +67,16 @@ Flickable {
     function activeDays() {
         var n = 0
         var days = app.historyDays || []
+        // Electron homeActiveDaysWindow: 'all' reports the retained-history
+        // summary; 'year' counts active cells inside the heatmap year.
+        var cutoff = ""
+        if (String(app.settings.homeActiveDaysWindow || "all") === "year") {
+            var d = new Date()
+            d.setDate(d.getDate() - 365)
+            cutoff = d.getFullYear() + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2)
+        }
         for (var i = 0; i < days.length; ++i) {
+            if (cutoff && String(days[i].date || "") < cutoff) continue
             if (Number(days[i].tokens || 0) > 0) n++
         }
         if (!n) return ""
@@ -132,7 +149,9 @@ Flickable {
         MouseArea {
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
-            onClicked: if (head.jumpView.length) app.view = head.jumpView
+            // Electron marks home-module jumps with fromHome, which is the only
+            // navigation that keeps the back-home row visible.
+            onClicked: if (head.jumpView.length) app.setViewFromHome(head.jumpView)
         }
     }
 
@@ -160,7 +179,7 @@ Flickable {
                 width: col.width
                 spacing: 12
                 Repeater {
-                    model: home.take(home.configuredLimits(), 3)
+                    model: home.take(home.configuredLimits(), Math.max(1, Number(app.settings.homeLimitAccountCount || 3)))
                     Column {
                         id: accountCol
                     property var account: modelData
@@ -188,9 +207,15 @@ Flickable {
                     RowLayout {
                         width: parent.width
                         spacing: 12
-                        Item { Layout.preferredWidth: 18; Layout.maximumWidth: 18; Layout.minimumWidth: 18; height: 1 }
+                        // Electron .home-limit-windows { margin-left: 18px }: the
+                        // window label starts exactly at the account name text
+                        // (icon 10 + gap 8). This layout's own 12px spacing
+                        // eats into the indent, so the spacer is 18 − 12.
+                        Item { Layout.preferredWidth: 6; Layout.maximumWidth: 6; Layout.minimumWidth: 6; height: 1 }
                         Repeater {
-                            model: home.take(accountCol.account.homeWindows || accountCol.account.windows || [], 2)
+                            model: home.take((accountCol.account.homeWindows && accountCol.account.homeWindows.length > 0)
+                                 ? accountCol.account.homeWindows
+                                 : (accountCol.account.windows || []), 2)
                             Column {
                                 Layout.fillWidth: true
                                 Layout.preferredWidth: 1

@@ -54,7 +54,14 @@ Item {
                 height: 22
                 Text {
                     anchors.centerIn: parent
-                    text: modelData.label
+                    // The middle slot reflects the selected month sub-range,
+                    // like Electron fixedPeriodRanges.displayLabel (WEEK/7D/30D).
+                    // Referencing periodMonthMode re-evaluates the label when
+                    // the default-range preference changes.
+                    text: {
+                        var _ = app.settings.periodMonthMode
+                        return modelData.id === "month" ? app.periodTabLabel : modelData.label
+                    }
                     color: app.period === modelData.id || (modelData.id === "month" && app.periodIndex === 1)
                            ? Theme.accent : Theme.muted
                     font.pixelSize: 9
@@ -95,6 +102,17 @@ Item {
         dim: false
         focus: true
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        // Electron opens its period menu with a quick fade/slide from the
+        // anchor; mirror that instead of popping in.
+        enter: Transition {
+            NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 140; easing.type: Easing.OutCubic }
+            NumberAnimation { property: "scale"; from: 0.96; to: 1; duration: 140; easing.type: Easing.OutCubic }
+        }
+        exit: Transition {
+            NumberAnimation { property: "opacity"; from: 1; to: 0; duration: 110; easing.type: Easing.OutCubic }
+            NumberAnimation { property: "scale"; from: 1; to: 0.97; duration: 110; easing.type: Easing.OutCubic }
+        }
+        transformOrigin: Item.TopRight
         background: Rectangle {
             radius: 7
             color: Qt.rgba(Theme.bg.r, Theme.bg.g, Theme.bg.b, 0.96)

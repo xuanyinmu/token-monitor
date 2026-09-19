@@ -24,6 +24,31 @@ Window {
         onTriggered: app.persistWindowSize(root.width, root.height)
     }
 
+    // Electron shows a range note instead of breakdown content the current
+    // fixed range cannot answer (session/project/device, or no history).
+    readonly property string fixedPeriodMessage: {
+        if (!app.fixedPeriodActive) return ""
+        var key = "periodRange.historyUnavailable"
+        var fallback = "History is not available for this range"
+        if (app.fixedPeriodReady) {
+            if (app.view === "session") {
+                key = "periodRange.sessionUnavailable"
+                fallback = "Sessions are not available for a fixed range"
+            } else if (app.view === "project") {
+                key = "periodRange.projectUnavailable"
+                fallback = "Projects are not available for a fixed range"
+            } else if (app.view === "device" && app.deviceRows.length === 0) {
+                // Electron derives device rows when every device answers with
+                // history; the local-only device derives, a multi-device hub
+                // without histories shows the note.
+            } else {
+                return ""
+            }
+        }
+        var s = app.i18n.t(key)
+        return (!s || s === key) ? fallback : s
+    }
+
     Rectangle {
         id: shell
         anchors.fill: parent
@@ -45,12 +70,23 @@ Window {
 
             Item {
                 id: settingsSlot
-                visible: app.settingsOpen
+                // Electron .settings-panel animates max-height 140ms + opacity
+                // 120ms (expand down, collapse up); mirror that here.
+                readonly property real targetHeight: app.settingsOpen
+                    ? Math.max(80, Math.min(settingsPanel.implicitHeight, Math.max(80, root.height - 220)))
+                    : 0
+                property real shownHeight: targetHeight
+                Behavior on shownHeight {
+                    NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                }
+                Behavior on opacity { NumberAnimation { duration: 120 } }
+                visible: shownHeight > 2
+                opacity: app.settingsOpen ? 1 : 0
                 z: 2
                 Layout.fillWidth: true
                 Layout.fillHeight: false
-                Layout.preferredHeight: settingsPanel.implicitHeight
-                Layout.maximumHeight: Math.max(80, root.height - 220)
+                Layout.preferredHeight: shownHeight
+                Layout.maximumHeight: root.height
                 Layout.minimumWidth: 0
                 Layout.minimumHeight: 0
                 clip: true
@@ -106,6 +142,7 @@ Window {
                     anchors.fill: parent
                     width: parent.width
                     height: parent.height
+                    visible: root.fixedPeriodMessage === ""
                     onLoaded: {
                         if (item) {
                             item.width = Qt.binding(function() { return width })
@@ -125,6 +162,19 @@ Window {
                         default: return homeComp
                         }
                     }
+                }
+
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: root.fixedPeriodMessage !== ""
+                    text: root.fixedPeriodMessage
+                    color: Theme.muted
+                    font.pixelSize: 11
+                    font.family: Theme.fontFamily
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    width: Math.min(parent.width - 32, 260)
                 }
 
                 SessionDetail {
@@ -174,7 +224,9 @@ Window {
             color: Theme.glass
             Text {
                 anchors.centerIn: parent
-                text: app.compactText
+                // Electron floatingBubbleContent: 'icon' shows the app mark,
+                // 'tokens' the compact number.
+                text: String(app.settings.floatingBubbleContent || "tokens") === "icon" ? "Σ" : app.compactText
                 color: Theme.number
                 font.pixelSize: 13
                 font.weight: Font.Bold

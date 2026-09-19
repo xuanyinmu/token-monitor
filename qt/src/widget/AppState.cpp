@@ -15,6 +15,7 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
+#include <QFileDialog>
 #include <QFile>
 #include <QFileInfo>
 #include <QFontDatabase>
@@ -277,6 +278,14 @@ QString devicePeriodKey(const QString &period)
     return QStringLiteral("month");
 }
 
+// Fixed headline selections (本周/最近 7 天/最近 30 天) are derived from the
+// daily history, mirroring Electron fixedPeriodRanges.isDerived().
+bool isDerivedPeriod(const QString &period)
+{
+    return period == QLatin1String("week") || period == QLatin1String("last7")
+        || period == QLatin1String("last30");
+}
+
 QJsonObject devicePeriodObject(const QJsonObject &device, const QString &period)
 {
     const auto key = devicePeriodKey(period);
@@ -386,11 +395,13 @@ AppState::AppState(QObject *parent)
         emit statusChanged();
     });
     connect(&m_i18n, &I18n::languageChanged, this, [this]() {
+        rebuildTrayMenu();
         emit viewChanged();
         emit settingsChanged();
     });
     m_runtime.configure(m_settings);
     rebuildRows();
+    rebuildTrayMenu();
     connect(&m_tray, &TrayController::activated, this, [this]() {
         if (m_window) m_window->showWindow();
     });
@@ -398,10 +409,112 @@ AppState::AppState(QObject *parent)
     connect(&m_tray, &TrayController::showLimits, this, [this]() { setView(QStringLiteral("limits")); });
     connect(&m_tray, &TrayController::showSettings, this, [this]() { setSettingsOpen(true); });
     connect(&m_tray, &TrayController::quitRequested, qApp, &QCoreApplication::quit);
+    connect(&m_tray, &TrayController::refreshRequested, this, &AppState::refresh);
+    connect(&m_tray, &TrayController::openViewRequested, this, [this](const QString &view) {
+        if (m_window) m_window->showWindow();
+        forceView(view);
+    });
+    connect(&m_tray, &TrayController::trayContentRequested, this, [this](const QString &content) {
+        updateSetting(QStringLiteral("trayContent"), content);
+    });
+    connect(&m_tray, &TrayController::presentationRequested, this, [this](const QString &presentation) {
+        if (presentation == QLatin1String("tray")) {
+            // Electron tray presentation parks the widget in the tray; the
+            // window returns on the next tray activation.
+            updateSetting(QStringLiteral("trayMode"), true);
+            if (m_window) m_window->hideWindow();
+            return;
+        }
+        updateSetting(QStringLiteral("trayMode"), false);
+        updateSetting(QStringLiteral("windowBehavior"), presentation);
+    });
     connect(&m_hotkey, &Hotkey::activated, this, [this]() {
         if (!m_window) return;
         if (m_window->window() && m_window->window()->isVisible()) m_window->hideWindow();
         else m_window->showWindow();
+    });
+    // Electron export.autoEnabled: write CSV+JSON on an interval while enabled.
+    m_exportTimer = new QTimer(this);
+    m_exportTimer->setInterval(30'000);
+    connect(m_exportTimer, &QTimer::timeout, this, [this]() {
+        if (!m_settings.value(QStringLiteral("exportAutoEnabled")).toBool()) return;
+        const qint64 interval = m_settings.value(QStringLiteral("exportIntervalMs")).toInt(60'000);
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (m_lastExportAt > 0 && now - m_lastExportAt < interval) return;
+        exportNow();
+        m_lastExportAt = now;
+    });
+    m_exportTimer->start();
+}
+
+// Electron tray.js buildTrayMenuTemplate, localized through the shared keys.
+void AppState::rebuildTrayMenu()
+{
+    const auto t = [this](const QString &key, const QString &fallback) {
+        const auto translated = m_i18n.t(key);
+        return (translated.isEmpty() || translated == key) ? fallback : translated;
+    };
+    QVariantList views;
+    for (const auto &id : allViews()) {
+        views.append(QVariantMap{
+            {QStringLiteral("id"), id},
+            {QStringLiteral("label"), viewLabelFor(id)},
+            {QStringLiteral("enabled"), !viewIsHidden(id)}
+        });
+    }
+    const struct { const char *value; const char *key; const char *fallback; } contentItems[] = {
+        {"tokens", "trayMenu.content.todayTokens", "Today tokens"},
+        {"cost", "trayMenu.content.todayCost", "Today cost"},
+        {"both", "trayMenu.content.todayBoth", "Today tokens & cost"},
+        {"tokensAll", "trayMenu.content.totalTokens", "Total tokens"},
+        {"costAll", "trayMenu.content.totalCost", "Total cost"},
+        {"bothAll", "trayMenu.content.totalBoth", "Total tokens & cost"},
+        {"limitsAllSessions", "trayMenu.content.aiToolLimits", "AI tool limits"},
+        {"liveTokenRate", "trayMenu.content.liveTokenRate", "Live token rate"},
+        {"barsSession", "trayMenu.content.sessionLimitBar", "Session limit bar"},
+        {"barsWeekly", "trayMenu.content.weeklyLimitBar", "Weekly limit bar"},
+        {"barsAllSessions", "trayMenu.content.allToolsLimitBars", "All tools limit bars"},
+        {"bars", "trayMenu.content.lowestRemainingLimitBar", "Lowest remaining bar"},
+        {"icon", "trayMenu.content.appIconOnly", "App icon only"},
+        {"custom", "trayMenu.content.custom", "Custom"}
+    };
+    QVariantList contentOptions;
+    for (const auto &item : contentItems) {
+        contentOptions.append(QVariantMap{
+            {QStringLiteral("value"), QString::fromUtf8(item.value)},
+            {QStringLiteral("label"), t(QString::fromUtf8(item.key), QString::fromUtf8(item.fallback))}
+        });
+    }
+    const struct { const char *value; const char *key; const char *fallback; } presentationItems[] = {
+        {"tray", "trayMenu.presentation.tray", "Tray only"},
+        {"floating", "trayMenu.presentation.floating", "Floating"},
+        {"normal", "trayMenu.presentation.normal", "Normal"},
+        {"desktop", "trayMenu.presentation.desktop", "Desktop"}
+    };
+    QVariantList presentationOptions;
+    for (const auto &item : presentationItems) {
+        presentationOptions.append(QVariantMap{
+            {QStringLiteral("value"), QString::fromUtf8(item.value)},
+            {QStringLiteral("label"), t(QString::fromUtf8(item.key), QString::fromUtf8(item.fallback))}
+        });
+    }
+    const auto presentation = m_settings.value(QStringLiteral("trayMode")).toBool()
+        ? QStringLiteral("tray")
+        : m_settings.value(QStringLiteral("windowBehavior")).toString();
+    m_tray.rebuildMenu(QVariantMap{
+        {QStringLiteral("refreshLabel"), t(QStringLiteral("trayMenu.refreshNow"), QStringLiteral("Refresh now"))},
+        {QStringLiteral("refreshEnabled"), true},
+        {QStringLiteral("openViewLabel"), t(QStringLiteral("trayMenu.openView"), QStringLiteral("Open View"))},
+        {QStringLiteral("views"), views},
+        {QStringLiteral("contentLabel"), t(QStringLiteral("trayMenu.trayDisplay"), QStringLiteral("Tray Display"))},
+        {QStringLiteral("contentOptions"), contentOptions},
+        {QStringLiteral("contentCurrent"), m_settings.value(QStringLiteral("trayContent")).toString(QStringLiteral("tokens"))},
+        {QStringLiteral("presentationLabel"), t(QStringLiteral("trayMenu.windowPresentation"), QStringLiteral("Window Presentation"))},
+        {QStringLiteral("presentationOptions"), presentationOptions},
+        {QStringLiteral("presentationCurrent"), presentation},
+        {QStringLiteral("versionLabel"), QStringLiteral("v") + QString::fromUtf8(kAppVersion)},
+        {QStringLiteral("settingsLabel"), t(QStringLiteral("trayMenu.settings"), QStringLiteral("Settings"))},
+        {QStringLiteral("quitLabel"), t(QStringLiteral("trayMenu.quit"), QStringLiteral("Quit"))}
     });
 }
 
@@ -421,7 +534,8 @@ void AppState::attachWindow(QWindow *window)
                               : QStringLiteral("off"),
                           m_settings.value(QStringLiteral("glassOpacity")).toInt(68),
                           m_settings.value(QStringLiteral("glassBlur")).toInt(32),
-                          m_settings.value(QStringLiteral("keepAboveTaskbar")).toBool());
+                          m_settings.value(QStringLiteral("keepAboveTaskbar")).toBool(),
+                          m_settings.value(QStringLiteral("hideAppIcon")).toBool());
     if (!m_previewOnly) {
         m_tray.setVisible(m_settings.value(QStringLiteral("showTrayIcon")).toBool(true));
         m_hotkey.registerShortcut(m_settings.value(QStringLiteral("windowToggleShortcut")).toString());
@@ -556,17 +670,16 @@ void AppState::showAllViews()
     updateSetting(QStringLiteral("hiddenViews"), QString());
 }
 
-void AppState::setView(const QString &view)
+// Electron setBreakdown: the back-home row only survives when the jump left
+// Home through a home-module click (fromHome); any other navigation resets it.
+void AppState::navigate(const QString &view, bool fromHome)
 {
     if (view == QLatin1String("settings")) {
         setSettingsOpen(true);
         return;
     }
     if (m_settingsOpen) setSettingsOpen(false);
-    if (m_view == QLatin1String("home") && view != QLatin1String("home"))
-        m_homeReturnVisible = true;
-    if (view == QLatin1String("home"))
-        m_homeReturnVisible = false;
+    m_homeReturnVisible = fromHome && m_view == QLatin1String("home") && view != QLatin1String("home");
     if (m_view == view) return;
     m_view = view;
     auto last = m_settings.value(QStringLiteral("lastViewState")).toObject();
@@ -575,6 +688,16 @@ void AppState::setView(const QString &view)
     persist();
     emit viewChanged();
     if (m_view == QLatin1String("status")) refreshServiceStatus();
+}
+
+void AppState::setView(const QString &view)
+{
+    navigate(view, false);
+}
+
+void AppState::setViewFromHome(const QString &view)
+{
+    navigate(view, true);
 }
 
 void AppState::cycleView()
@@ -735,6 +858,21 @@ void AppState::refreshHealthCounts()
 QString AppState::uiIcon(const QString &rel) const
 {
     return QStringLiteral("qrc:/ui/icons/%1").arg(rel);
+}
+
+QString AppState::iconUrl(const QString &id) const
+{
+    // Clients that reuse a vendor mark have no file of their own — the same
+    // mapping Electron's .row-icon-<id> CSS table encodes (zcode→zai,
+    // micode→xiaomi, hermes→hermes-agent, grok→xai).
+    static const QHash<QString, QString> aliases{
+        {QStringLiteral("zcode"), QStringLiteral("zai")},
+        {QStringLiteral("micode"), QStringLiteral("xiaomi")},
+        {QStringLiteral("hermes"), QStringLiteral("hermes-agent")},
+        {QStringLiteral("grok"), QStringLiteral("xai")}
+    };
+    const auto path = QStringLiteral(":/icons/icons/%1.svg").arg(aliases.value(id, id));
+    return QFile::exists(path) ? QStringLiteral("qrc") + path : QString();
 }
 
 void AppState::saveScreenshot(const QString &path)
@@ -979,11 +1117,13 @@ void AppState::updateSetting(const QString &key, const QVariant &value)
                               backdrop,
                               m_settings.value(QStringLiteral("glassOpacity")).toInt(68),
                               m_settings.value(QStringLiteral("glassBlur")).toInt(32),
-                              m_settings.value(QStringLiteral("keepAboveTaskbar")).toBool());
+                              m_settings.value(QStringLiteral("keepAboveTaskbar")).toBool(),
+                          m_settings.value(QStringLiteral("hideAppIcon")).toBool());
     }
     m_tray.setVisible(m_settings.value(QStringLiteral("showTrayIcon")).toBool(true));
     m_hotkey.registerShortcut(m_settings.value(QStringLiteral("windowToggleShortcut")).toString());
     applyTopEdge();
+    rebuildTrayMenu();
     emit settingsChanged();
 }
 
@@ -1010,6 +1150,18 @@ void AppState::exportDiagnostics()
     if (dir.isEmpty()) dir = QDir(Paths::userDataDir()).filePath(QStringLiteral("export"));
     tmon::exportDiagnostics(QJsonObject::fromVariantMap(m_settingsUi), m_runtime.displayStats(),
                             m_runtime.usage()->lastError(), dir);
+}
+
+// Electron's export folder picker (dialog.showOpenDialog): a native directory
+// dialog seeded with the current export dir.
+void AppState::pickExportDir()
+{
+    auto dir = m_settings.value(QStringLiteral("exportDir")).toString();
+    if (dir.isEmpty()) dir = QDir(Paths::userDataDir()).filePath(QStringLiteral("export"));
+    const auto picked = QFileDialog::getExistingDirectory(nullptr,
+        tr("Choose export folder"), dir, QFileDialog::ShowDirsOnly);
+    if (picked.isEmpty()) return;
+    updateSetting(QStringLiteral("exportDir"), QDir::toNativeSeparators(picked));
 }
 
 void AppState::checkUpdates()
@@ -1140,12 +1292,6 @@ QString AppState::formatNumber(double tokens) const
 QString AppState::clientLabelOf(const QString &id) const
 {
     return clientLabel(id);
-}
-
-QString AppState::iconUrl(const QString &id) const
-{
-    const auto path = QStringLiteral(":/icons/icons/%1.svg").arg(id);
-    return QFile::exists(path) ? QStringLiteral("qrc") + path : QString();
 }
 
 bool AppState::floatingBubble() const
@@ -1418,6 +1564,8 @@ void AppState::startAtLogin(bool on)
 
 QJsonObject AppState::periodNamed(const QString &name) const
 {
+    if (isDerivedPeriod(name))
+        return m_derivedPeriod;
     const auto stats = m_runtime.displayStats();
     auto periods = stats.value(QStringLiteral("periods")).toObject();
     if (periods.isEmpty()) periods = QJsonObject{
@@ -1425,10 +1573,111 @@ QJsonObject AppState::periodNamed(const QString &name) const
         {QStringLiteral("month"), m_runtime.deviceRecord().value(QStringLiteral("month"))},
         {QStringLiteral("allTime"), m_runtime.deviceRecord().value(QStringLiteral("allTime"))}
     };
-    QString key = name;
-    if (key == QLatin1String("week") || key == QLatin1String("last7") || key == QLatin1String("last30"))
-        key = QStringLiteral("month");
-    return periods.value(key).toObject();
+    return periods.value(name).toObject();
+}
+
+bool AppState::fixedPeriodActive() const
+{
+    return isDerivedPeriod(m_period);
+}
+
+QStringList AppState::fixedPeriodRange() const
+{
+    return m_derivedRange;
+}
+
+QString AppState::periodTabLabel() const
+{
+    // Electron syncPeriodTabs: the middle slot always carries a month-mode
+    // label — the live selection while the month slot is active, otherwise the
+    // periodMonthMode preference. It never reads TOTAL.
+    QString mode;
+    if (m_period == QLatin1String("month") || isDerivedPeriod(m_period))
+        mode = m_period;
+    else
+        mode = m_settings.value(QStringLiteral("periodMonthMode")).toString(QStringLiteral("month"));
+    if (mode == QLatin1String("week")) return QStringLiteral("WEEK");
+    if (mode == QLatin1String("last7")) return QStringLiteral("7D");
+    if (mode == QLatin1String("last30")) return QStringLiteral("30D");
+    return QStringLiteral("MONTH");
+}
+
+// Rebuilds the derived 本周/最近 7 天/最近 30 天 period from the retained daily
+// history, mirroring Electron fixedPeriodRanges.derivePeriod(): sum tokens/cost
+// over the selected date range and fold the per-day client/model attribution
+// back into a period object. A day's activeTimeMs travels with the day record
+// (Electron's archive writes it; a Qt-only install currently has none), so the
+// range-scoped active time matches the Electron summary semantics.
+void AppState::rebuildDerivedPeriod()
+{
+    m_derivedPeriod = QJsonObject{};
+    m_derivedRange.clear();
+    m_derivedReady = false;
+    if (!isDerivedPeriod(m_period) || m_historyDays.isEmpty()) return;
+
+    const auto today = QDate::currentDate();
+    QDate start;
+    if (m_period == QLatin1String("week")) {
+        // Electron rangeForSelection: locale-aware week start, ISO Monday fallback.
+        auto localeName = m_i18n.resolvedLanguage();
+        if (localeName.isEmpty()) localeName = QLocale::system().name();
+        const auto loc = QLocale(localeName);
+        const int firstDay = int(loc.firstDayOfWeek()); // Qt: Monday=1 … Sunday=7
+        start = today.addDays(-((today.dayOfWeek() - firstDay) + 7) % 7);
+    } else if (m_period == QLatin1String("last7")) {
+        start = today.addDays(-6);
+    } else {
+        start = today.addDays(-29);
+    }
+    const QString startKey = start.toString(Qt::ISODate);
+    const QString endKey = today.toString(Qt::ISODate);
+    m_derivedRange = {startKey, endKey};
+
+    double tokens = 0, cost = 0;
+    QHash<QString, double> clientTokens, clientCosts, modelTokens, modelCosts;
+    for (const auto &v : m_historyDays) {
+        const auto day = v.toMap();
+        const auto key = day.value(QStringLiteral("date")).toString();
+        if (key < startKey || key > endKey) continue;
+        tokens += day.value(QStringLiteral("tokens")).toDouble();
+        cost += day.value(QStringLiteral("cost")).toDouble();
+        const auto dayClients = day.value(QStringLiteral("clients")).toMap();
+        const auto dayClientCosts = day.value(QStringLiteral("clientCosts")).toMap();
+        for (auto it = dayClients.begin(); it != dayClients.end(); ++it) {
+            clientTokens[it.key()] += it.value().toDouble();
+            clientCosts[it.key()] += dayClientCosts.value(it.key()).toDouble();
+        }
+        const auto dayModels = day.value(QStringLiteral("models")).toMap();
+        const auto dayModelCosts = day.value(QStringLiteral("modelCosts")).toMap();
+        for (auto it = dayModels.begin(); it != dayModels.end(); ++it) {
+            modelTokens[it.key()] += it.value().toDouble();
+            modelCosts[it.key()] += dayModelCosts.value(it.key()).toDouble();
+        }
+    }
+
+    auto mapOf = [](const QHash<QString, double> &hash) {
+        QJsonObject out;
+        for (auto it = hash.begin(); it != hash.end(); ++it)
+            out.insert(it.key(), qMax(0.0, std::round(it.value())));
+        return out;
+    };
+    auto costMapOf = [](const QHash<QString, double> &hash) {
+        QJsonObject out;
+        for (auto it = hash.begin(); it != hash.end(); ++it) {
+            if (it.value() != 0) out.insert(it.key(), it.value());
+        }
+        return out;
+    };
+    m_derivedPeriod = QJsonObject{
+        {QStringLiteral("totalTokens"), qMax(0.0, std::round(tokens))},
+        {QStringLiteral("costUsd"), cost},
+        {QStringLiteral("clients"), mapOf(clientTokens)},
+        {QStringLiteral("clientCosts"), costMapOf(clientCosts)},
+        {QStringLiteral("models"), mapOf(modelTokens)},
+        {QStringLiteral("modelCosts"), costMapOf(modelCosts)},
+        {QStringLiteral("derivedFixedRange"), true}
+    };
+    m_derivedReady = true;
 }
 
 QJsonObject AppState::currentPeriod() const
@@ -1525,16 +1774,21 @@ void AppState::rebuildDashboard()
 
 QString AppState::totalText() const
 {
+    // Electron renders '—' for a fixed range when no device answers with
+    // history, so a missing history never reads as silent zeroes.
+    if (fixedPeriodActive() && !m_derivedReady) return QStringLiteral("—");
     return QLocale(QLocale::English).toString(qint64(asNumber(currentPeriod().value(QStringLiteral("totalTokens")))));
 }
 
 QString AppState::compactText() const
 {
+    if (fixedPeriodActive() && !m_derivedReady) return QStringLiteral("0");
     return formatTokens(asNumber(currentPeriod().value(QStringLiteral("totalTokens"))));
 }
 
 QString AppState::costText() const
 {
+    if (fixedPeriodActive() && !m_derivedReady) return QString();
     const double usd = asNumber(currentPeriod().value(QStringLiteral("costUsd")));
     const auto currency = m_settings.value(QStringLiteral("currency")).toString(QStringLiteral("USD"));
     double rate = 1;
@@ -1563,7 +1817,10 @@ void AppState::applyTheme()
     const QString number = preset == QLatin1String("porcelain") ? QStringLiteral("#1c1f26") : QStringLiteral("#f3fbf7");
     auto uiFont = cssFirstFamily(m_settings.value(QStringLiteral("interfaceFontFamily")).toString());
     if (uiFont.isEmpty())
-        uiFont = pickInstalledFont({QStringLiteral("Cascadia Mono"), QStringLiteral("Cascadia Code"), QStringLiteral("Consolas")}, QStringLiteral("Segoe UI"));
+        // Electron's --ui-font default leads with ui-monospace, which Chromium
+        // resolves to Consolas on Windows — not Cascadia (wider, and the reason
+        // Qt rows read crowded next to Electron's).
+        uiFont = pickInstalledFont({QStringLiteral("Consolas"), QStringLiteral("Cascadia Mono"), QStringLiteral("Cascadia Code")}, QStringLiteral("Segoe UI"));
     auto displayFont = cssFirstFamily(m_settings.value(QStringLiteral("displayFontFamily")).toString());
     if (displayFont.isEmpty())
         displayFont = pickInstalledFont({QStringLiteral("Segoe UI"), QStringLiteral("SF Pro Display")}, QStringLiteral("Segoe UI"));
@@ -1590,6 +1847,71 @@ void AppState::persist()
 
 void AppState::rebuildRows()
 {
+    // History first: a fixed-range selection (本周/最近 7 天/最近 30 天) derives
+    // its period from these days, so everything below must see the fresh
+    // derivation — not the one built during the previous stats frame.
+    m_historyDays.clear();
+    const auto hist = m_runtime.usage()->history().value(QStringLiteral("days")).toObject();
+    QStringList keys = hist.keys();
+    keys.sort();
+    const auto start = keys.size() > 371 ? keys.size() - 371 : 0;
+    auto dayRowOf = [](const QString &key, const QJsonObject &day) {
+        return QVariantMap{
+            {QStringLiteral("date"), key},
+            {QStringLiteral("tokens"), asNumber(day.value(QStringLiteral("tokens")))},
+            {QStringLiteral("cost"), asNumber(day.value(QStringLiteral("costUsd")))},
+            {QStringLiteral("activeTimeMs"), asNumber(day.value(QStringLiteral("activeTimeMs")))},
+            {QStringLiteral("clients"), day.value(QStringLiteral("clients")).toObject().toVariantMap()},
+            {QStringLiteral("clientCosts"), day.value(QStringLiteral("clientCosts")).toObject().toVariantMap()},
+            {QStringLiteral("models"), day.value(QStringLiteral("models")).toObject().toVariantMap()},
+            {QStringLiteral("modelCosts"), day.value(QStringLiteral("modelCosts")).toObject().toVariantMap()}
+        };
+    };
+    for (int i = start; i < keys.size(); ++i)
+        m_historyDays.append(dayRowOf(keys[i], hist.value(keys[i]).toObject()));
+    // Electron clampDaily(points, 45) slices the history series as stored.
+    // History omits zero days, so the sparkline can span from first usage
+    // (e.g. Apr) rather than the last 45 calendar days of zeros + a spike.
+    const auto todayKey = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
+    const auto todayPeriod = periodNamed(QStringLiteral("today"));
+    const double liveTokens = asNumber(todayPeriod.value(QStringLiteral("totalTokens")));
+    const double liveCost = asNumber(todayPeriod.value(QStringLiteral("costUsd")));
+    bool patchedToday = false;
+    for (int i = 0; i < m_historyDays.size(); ++i) {
+        auto map = m_historyDays[i].toMap();
+        if (map.value(QStringLiteral("date")).toString() != todayKey) continue;
+        // Electron dailyWithLiveToday only overrides the stored day when the
+        // live period is at least as large — an empty/absent today period
+        // (cold start before the first scan) must not zero a real day.
+        if (liveTokens < map.value(QStringLiteral("tokens")).toDouble()) {
+            patchedToday = true;
+            break;
+        }
+        map.insert(QStringLiteral("tokens"), liveTokens);
+        map.insert(QStringLiteral("cost"), liveCost);
+        // Electron dailyWithLiveToday folds the live period's attribution over
+        // today's row, so derived ranges count today's usage per client/model.
+        map.insert(QStringLiteral("clients"), todayPeriod.value(QStringLiteral("clients")).toObject().toVariantMap());
+        map.insert(QStringLiteral("clientCosts"), todayPeriod.value(QStringLiteral("clientCosts")).toObject().toVariantMap());
+        map.insert(QStringLiteral("models"), todayPeriod.value(QStringLiteral("models")).toObject().toVariantMap());
+        map.insert(QStringLiteral("modelCosts"), todayPeriod.value(QStringLiteral("modelCosts")).toObject().toVariantMap());
+        m_historyDays[i] = map;
+        patchedToday = true;
+    }
+    if (!patchedToday && (liveTokens > 0 || liveCost > 0)) {
+        QVariantMap liveRow{
+            {QStringLiteral("date"), todayKey},
+            {QStringLiteral("tokens"), liveTokens},
+            {QStringLiteral("cost"), liveCost},
+            {QStringLiteral("clients"), todayPeriod.value(QStringLiteral("clients")).toObject().toVariantMap()},
+            {QStringLiteral("clientCosts"), todayPeriod.value(QStringLiteral("clientCosts")).toObject().toVariantMap()},
+            {QStringLiteral("models"), todayPeriod.value(QStringLiteral("models")).toObject().toVariantMap()},
+            {QStringLiteral("modelCosts"), todayPeriod.value(QStringLiteral("modelCosts")).toObject().toVariantMap()}
+        };
+        m_historyDays.append(liveRow);
+    }
+    rebuildDerivedPeriod();
+
     const auto period = currentPeriod();
     const double total = asNumber(period.value(QStringLiteral("totalTokens")));
     const auto clients = period.value(QStringLiteral("clients")).toObject();
@@ -1717,6 +2039,30 @@ void AppState::rebuildRows()
                     + (showUsed ? QStringLiteral("used") : QStringLiteral("left"));
             }
             const double barRemain = std::isfinite(remainPct) ? remainPct : 0;
+            // Electron formatLimitBoundary: a grant expiry reads "Expires in…",
+            // a mixed boundary "Changes in…", everything else "Reset in…";
+            // a window without a timestamp falls back to its cadence label.
+            QString resetText;
+            auto resetAt = QDateTime::fromString(w.value(QStringLiteral("resetsAt")).toString(), Qt::ISODateWithMs);
+            if (!resetAt.isValid())
+                resetAt = QDateTime::fromString(w.value(QStringLiteral("resetsAt")).toString(), Qt::ISODate);
+            const auto boundaryKind = w.value(QStringLiteral("boundaryKind")).toString();
+            if (resetAt.isValid()) {
+                const qint64 diffMs = QDateTime::currentDateTimeUtc().msecsTo(resetAt);
+                const bool mixed = boundaryKind == QLatin1String("mixed");
+                const QString prefix = boundaryKind == QLatin1String("expiry") ? QStringLiteral("Expires")
+                    : mixed ? QStringLiteral("Changes in") : QStringLiteral("Reset");
+                if (diffMs <= 0)
+                    resetText = mixed ? QStringLiteral("Changes now") : prefix + QStringLiteral(" now");
+                else
+                    resetText = prefix + QLatin1Char(' ') + formatDurationMs(diffMs);
+            } else {
+                const auto desc = w.value(QStringLiteral("resetDescription")).toString();
+                if (!desc.isEmpty()) {
+                    resetText = m_i18n.t(QStringLiteral("home.reset"), {{QStringLiteral("value"), desc}});
+                    if (resetText == QLatin1String("home.reset")) resetText = QStringLiteral("Reset ") + desc;
+                }
+            }
             windowRows.append(QVariantMap{
                 {QStringLiteral("kind"), kind},
                 {QStringLiteral("label"), label},
@@ -1726,7 +2072,7 @@ void AppState::rebuildRows()
                 {QStringLiteral("value"), valueText},
                 {QStringLiteral("metric"), metric},
                 {QStringLiteral("showMeter"), showMeter},
-                {QStringLiteral("resetText"), formatResetText(w.value(QStringLiteral("resetsAt")).toString())}
+                {QStringLiteral("resetText"), resetText}
             });
             ++windowCount;
         }
@@ -1770,27 +2116,55 @@ void AppState::rebuildRows()
     const auto localId = m_settings.value(QStringLiteral("deviceId")).toString();
     double maxDevice = 0;
     QVector<QVariantMap> deviceMaps;
-    for (const auto &dV : devices) {
-        const auto d = dV.toObject();
-        const auto periodObj = devicePeriodObject(d, m_period);
-        const auto tokens = asNumber(periodObj.value(QStringLiteral("totalTokens")));
-        maxDevice = qMax(maxDevice, tokens);
-        const auto updatedAt = d.value(QStringLiteral("updatedAt")).toString();
-        QStringList extra;
-        const auto platform = d.value(QStringLiteral("osName")).toString(d.value(QStringLiteral("platform")).toString());
-        if (!platform.isEmpty()) extra.append(platform);
-        if (d.value(QStringLiteral("stale")).toBool()) extra.append(QStringLiteral("stale"));
-        else if (!updatedAt.isEmpty()) extra.append(formatUpdatedText(updatedAt));
-        deviceMaps.append(QVariantMap{
-            {QStringLiteral("id"), d.value(QStringLiteral("deviceId")).toString()},
-            {QStringLiteral("label"), d.value(QStringLiteral("hostname")).toString()},
-            {QStringLiteral("stale"), d.value(QStringLiteral("stale")).toBool()},
-            {QStringLiteral("tokens"), tokens},
-            {QStringLiteral("cost"), asNumber(periodObj.value(QStringLiteral("costUsd")))},
-            {QStringLiteral("platform"), d.value(QStringLiteral("platform")).toString()},
-            {QStringLiteral("extra"), extra.join(QStringLiteral(" · "))},
-            {QStringLiteral("local"), !localId.isEmpty() && d.value(QStringLiteral("deviceId")).toString() == localId}
-        });
+    if (fixedPeriodActive()) {
+        // Electron derives per-device rows from each device's history snapshot;
+        // Qt only has the local device's history, so a lone device derives from
+        // the fixed-range period and multi-device hubs show no rows at all
+        // (the range note replaces the list, like Electron's unavailable state).
+        if (devices.size() == 1) {
+            const auto d = devices.first().toObject();
+            const auto updatedAt = d.value(QStringLiteral("updatedAt")).toString();
+            QStringList extra;
+            const auto platform = d.value(QStringLiteral("osName")).toString(d.value(QStringLiteral("platform")).toString());
+            if (!platform.isEmpty()) extra.append(platform);
+            if (d.value(QStringLiteral("stale")).toBool()) extra.append(QStringLiteral("stale"));
+            else if (!updatedAt.isEmpty()) extra.append(formatUpdatedText(updatedAt));
+            maxDevice = asNumber(m_derivedPeriod.value(QStringLiteral("totalTokens")));
+            deviceMaps.append(QVariantMap{
+                {QStringLiteral("id"), d.value(QStringLiteral("deviceId")).toString()},
+                {QStringLiteral("label"), d.value(QStringLiteral("hostname")).toString()},
+                {QStringLiteral("stale"), d.value(QStringLiteral("stale")).toBool()},
+                {QStringLiteral("tokens"), maxDevice},
+                {QStringLiteral("cost"), asNumber(m_derivedPeriod.value(QStringLiteral("costUsd")))},
+                {QStringLiteral("platform"), d.value(QStringLiteral("platform")).toString()},
+                {QStringLiteral("extra"), extra.join(QStringLiteral(" · "))},
+                {QStringLiteral("local"), !localId.isEmpty()
+                    && d.value(QStringLiteral("deviceId")).toString() == localId}
+            });
+        }
+    } else {
+        for (const auto &dV : devices) {
+            const auto d = dV.toObject();
+            const auto periodObj = devicePeriodObject(d, m_period);
+            const auto tokens = asNumber(periodObj.value(QStringLiteral("totalTokens")));
+            maxDevice = qMax(maxDevice, tokens);
+            const auto updatedAt = d.value(QStringLiteral("updatedAt")).toString();
+            QStringList extra;
+            const auto platform = d.value(QStringLiteral("osName")).toString(d.value(QStringLiteral("platform")).toString());
+            if (!platform.isEmpty()) extra.append(platform);
+            if (d.value(QStringLiteral("stale")).toBool()) extra.append(QStringLiteral("stale"));
+            else if (!updatedAt.isEmpty()) extra.append(formatUpdatedText(updatedAt));
+            deviceMaps.append(QVariantMap{
+                {QStringLiteral("id"), d.value(QStringLiteral("deviceId")).toString()},
+                {QStringLiteral("label"), d.value(QStringLiteral("hostname")).toString()},
+                {QStringLiteral("stale"), d.value(QStringLiteral("stale")).toBool()},
+                {QStringLiteral("tokens"), tokens},
+                {QStringLiteral("cost"), asNumber(periodObj.value(QStringLiteral("costUsd")))},
+                {QStringLiteral("platform"), d.value(QStringLiteral("platform")).toString()},
+                {QStringLiteral("extra"), extra.join(QStringLiteral(" · "))},
+                {QStringLiteral("local"), !localId.isEmpty() && d.value(QStringLiteral("deviceId")).toString() == localId}
+            });
+        }
     }
     std::sort(deviceMaps.begin(), deviceMaps.end(), [](const QVariantMap &a, const QVariantMap &b) {
         return a.value(QStringLiteral("tokens")).toDouble() > b.value(QStringLiteral("tokens")).toDouble();
@@ -1800,46 +2174,7 @@ void AppState::rebuildRows()
         row.insert(QStringLiteral("percent"), maxDevice > 0 ? tokens / maxDevice : 0.0);
         m_deviceRows.append(row);
     }
-    m_historyDays.clear();
     m_trendPoints.clear();
-    const auto hist = m_runtime.usage()->history().value(QStringLiteral("days")).toObject();
-    QStringList keys = hist.keys();
-    keys.sort();
-    const auto start = keys.size() > 371 ? keys.size() - 371 : 0;
-    for (int i = start; i < keys.size(); ++i) {
-        const auto day = hist.value(keys[i]).toObject();
-        const double tokens = asNumber(day.value(QStringLiteral("tokens")));
-        const double cost = asNumber(day.value(QStringLiteral("costUsd")));
-        m_historyDays.append(QVariantMap{
-            {QStringLiteral("date"), keys[i]},
-            {QStringLiteral("tokens"), tokens},
-            {QStringLiteral("cost"), cost},
-            {QStringLiteral("activeTimeMs"), asNumber(day.value(QStringLiteral("activeTimeMs")))}
-        });
-    }
-    // Electron clampDaily(points, 45) slices the history series as stored.
-    // History omits zero days, so the sparkline can span from first usage
-    // (e.g. Apr) rather than the last 45 calendar days of zeros + a spike.
-    const auto todayKey = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
-    const auto todayPeriod = periodNamed(QStringLiteral("today"));
-    const double liveTokens = asNumber(todayPeriod.value(QStringLiteral("totalTokens")));
-    const double liveCost = asNumber(todayPeriod.value(QStringLiteral("costUsd")));
-    bool patchedToday = false;
-    for (int i = 0; i < m_historyDays.size(); ++i) {
-        auto map = m_historyDays[i].toMap();
-        if (map.value(QStringLiteral("date")).toString() != todayKey) continue;
-        map.insert(QStringLiteral("tokens"), liveTokens);
-        map.insert(QStringLiteral("cost"), liveCost);
-        m_historyDays[i] = map;
-        patchedToday = true;
-    }
-    if (!patchedToday && (liveTokens > 0 || liveCost > 0)) {
-        m_historyDays.append(QVariantMap{
-            {QStringLiteral("date"), todayKey},
-            {QStringLiteral("tokens"), liveTokens},
-            {QStringLiteral("cost"), liveCost}
-        });
-    }
     const int trendStart = m_historyDays.size() > 45 ? m_historyDays.size() - 45 : 0;
     for (int i = trendStart; i < m_historyDays.size(); ++i) {
         const auto map = m_historyDays[i].toMap();
