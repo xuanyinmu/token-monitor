@@ -5,15 +5,23 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QThread>
 
 namespace tmon {
 
 SubprocessResult runProcess(const QString &program, const QStringList &args,
-                            int timeoutMs, const QString &workingDir)
+                            int timeoutMs, const QString &workingDir,
+                            const QMap<QString, QString> &extraEnv)
 {
     SubprocessResult result;
     QProcess proc;
+    if (!extraEnv.isEmpty()) {
+        auto env = QProcessEnvironment::systemEnvironment();
+        for (auto it = extraEnv.begin(); it != extraEnv.end(); ++it)
+            env.insert(it.key(), it.value());
+        proc.setProcessEnvironment(env);
+    }
     if (!workingDir.isEmpty()) proc.setWorkingDirectory(workingDir);
     proc.setProcessChannelMode(QProcess::SeparateChannels);
     proc.start(program, args);

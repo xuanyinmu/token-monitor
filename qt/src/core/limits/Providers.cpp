@@ -6,6 +6,7 @@
 #include "core/io/Paths.h"
 #include "core/limits/LimitsCore.h"
 #include "core/limits/SpendStore.h"
+#include "core/limits/ZcodeDiscovery.h"
 #include "core/net/HttpClient.h"
 #include "core/process/Subprocess.h"
 
@@ -202,37 +203,110 @@ QJsonObject fetchMinimax(const QJsonObject &settings, HttpClient &http)
 
 QJsonObject fetchZai(const QJsonObject &settings, HttpClient &http)
 {
+    // Electron lanes (src/shared/providers/zai/limits.js): the console-key
+    // quota lane and the local ZCode-desktop login lane run independently and
+    // merge; a ZCode-only row reports oauth. The ZCode lane reads ~/.zcode/v2
+    // (mirror JWT) — never drives a browser.
     const auto key = settingOrEnv(settings, QStringLiteral("zaiApiKey"),
-                                  {QStringLiteral("ZAI_API_KEY"), QStringLiteral("Z_AI_API_KEY"), QStringLiteral("GLM_API_KEY")});
-    if (key.isEmpty()) return notConfiguredProvider(QStringLiteral("zai"));
+                                  {QStringLiteral("ZAI_API_KEY"), QStringLiteral("Z_AI_API_KEY"),
+                                   QStringLiteral("GLM_API_KEY"), QStringLiteral("ZHIPU_API_KEY")});
     const auto region = settings.value(QStringLiteral("zaiApiRegion")).toString(QStringLiteral("global"));
-    const auto base = region == QLatin1String("bigmodel-cn")
-        ? QStringLiteral("https://open.bigmodel.cn")
-        : QStringLiteral("https://api.z.ai");
-    const auto headers = QMap<QString, QString>{{QStringLiteral("Authorization"), QStringLiteral("Bearer ") + key}};
-    const auto res = http.get(QUrl(base + QStringLiteral("/api/monitor/usage/quota/limit")), headers);
-    if (res.status != 200) return errorProvider(QStringLiteral("zai"), QStringLiteral("api"), statusForHttp(res.status), hashKey(QStringLiteral("zai"), key));
-    QJsonArray windows;
-    const auto limits = res.json().object().value(QStringLiteral("data")).toArray();
-    auto list = limits.isEmpty() ? res.json().object().value(QStringLiteral("limits")).toArray() : limits;
-    if (list.isEmpty() && res.json().object().contains(QStringLiteral("usage")))
-        list = QJsonArray{res.json().object()};
-    for (const auto &itemV : list) {
-        const auto item = itemV.toObject();
-        const auto usage = item.value(QStringLiteral("usage")).toDouble();
-        const auto remaining = item.value(QStringLiteral("remaining")).toDouble();
-        const double total = usage > 0 ? usage : remaining + item.value(QStringLiteral("currentValue")).toDouble();
-        if (total <= 0) continue;
-        const double used = total - remaining;
-        windows.append(windowUsedLimit(QStringLiteral("billing"), QStringLiteral("Quota"), used, total));
+
+    QString keyError;
+    QJsonArray keyWindows;
+    QString keyPlan;
+    if (!key.isEmpty()) {
+        const auto base = region == QLatin1String("bigmodel-cn")
+            ? QStringLiteral("https://open.bigmodel.cn")
+            : QStringLiteral("https://api.z.ai");
+        const auto headers = QMap<QString, QString>{{QStringLiteral("Authorization"), QStringLiteral("Bearer ") + key}};
+        const auto res = http.get(QUrl(base + QStringLiteral("/api/monitor/usage/quota/limit")), headers, 12000);
+        if (res.status != 200) {
+            keyError = statusForHttp(res.status);
+        } else {
+            const auto usage = parseZaiUsage(res.json().object());
+            keyWindows = usage.value(QStringLiteral("windows")).toArray();
+            keyPlan = usage.value(QStringLiteral("plan")).toString();
+        }
     }
+
+    QJsonArray planWindows;
+    QString planLabel;
+    QString planError;
+    bool planAttempted = false;
+    const auto discovery = discoverZcodeConnection();
+    const auto mirrorKey = discovery.mirrorKey;
+    if ((discovery.kind == QLatin1String("coding-quota") || discovery.kind == QLatin1String("start-billing"))
+        && discovery.entitled && !mirrorKey.isEmpty()) {
+        planAttempted = true;
+        // Quota rides the console-key endpoint with the mirror token; billing
+        // is account-level on ZCode's own endpoint and never blocks quota.
+        if (discovery.kind == QLatin1String("coding-quota")) {
+            const auto mirrorRegion = discovery.family == QLatin1String("bigmodel")
+                ? QStringLiteral("bigmodel-cn") : QStringLiteral("global");
+            if (!(mirrorKey == key && mirrorRegion == region)) {
+                const auto mirrorBase = mirrorRegion == QLatin1String("bigmodel-cn")
+                    ? QStringLiteral("https://open.bigmodel.cn")
+                    : QStringLiteral("https://api.z.ai");
+                const auto headers = QMap<QString, QString>{
+                    {QStringLiteral("Authorization"), QStringLiteral("Bearer ") + mirrorKey},
+                    {QStringLiteral("Accept"), QStringLiteral("application/json")}
+                };
+                const auto res = http.get(QUrl(mirrorBase + QStringLiteral("/api/monitor/usage/quota/limit")), headers, 12000);
+                if (res.status != 200) {
+                    if (key.isEmpty()) planError = QStringLiteral("unavailable");
+                } else {
+                    const auto usage = parseZaiUsage(res.json().object());
+                    const auto ws = usage.value(QStringLiteral("windows")).toArray();
+                    for (const auto &w : ws) planWindows.append(w);
+                    if (planLabel.isEmpty()) planLabel = usage.value(QStringLiteral("plan")).toString();
+                }
+            }
+        }
+        const auto billingKey = discovery.billingKey.isEmpty() ? mirrorKey : discovery.billingKey;
+        QMap<QString, QString> billingHeaders{
+            {QStringLiteral("Authorization"), QStringLiteral("Bearer ") + billingKey},
+            {QStringLiteral("Accept"), QStringLiteral("application/json")}
+        };
+        if (!discovery.deviceMid.isEmpty())
+            billingHeaders.insert(QStringLiteral("X-Device-Mid"), discovery.deviceMid);
+        const auto billing = http.get(QUrl(QStringLiteral("https://zcode.z.ai/api/v1/zcode-plan/billing/balance")),
+                                      billingHeaders, 12000);
+        if (billing.status != 200) {
+            // Mirror tokens are ZCode-managed and rotate there; auth failures
+            // degrade to unavailable rather than contradicting the login.
+            if (planWindows.isEmpty() && key.isEmpty()) planError = QStringLiteral("unavailable");
+        } else {
+            const auto usage = parseZcodeStartPlanBalances(billing.json().object());
+            const auto ws = usage.value(QStringLiteral("windows")).toArray();
+            for (const auto &w : ws) planWindows.append(w);
+            if (planLabel.isEmpty()) planLabel = usage.value(QStringLiteral("plan")).toString();
+        }
+    }
+
+    QJsonArray windows = keyWindows;
+    for (const auto &w : planWindows) windows.append(w);
+    const bool hasAnything = !windows.isEmpty();
+    const auto accountKey = !key.isEmpty() ? hashKey(QStringLiteral("zai"), key)
+        : (!mirrorKey.isEmpty() ? hashKey(QStringLiteral("zai"), mirrorKey) : QString());
+    const auto plan = !keyPlan.isEmpty() ? keyPlan : planLabel;
+    const auto source = !key.isEmpty() ? QStringLiteral("api")
+        : (hasAnything || !planError.isEmpty() || planAttempted ? QStringLiteral("oauth") : QString());
+    QString status;
+    if (!keyError.isEmpty()) status = keyError;
+    else if (!planError.isEmpty()) status = planError;
+    else if (hasAnything) status = QStringLiteral("ok");
+    else if (!key.isEmpty() || planAttempted) status = QStringLiteral("unavailable");
+    else status = QStringLiteral("notConfigured");
+
     return normalizeLimitProvider(QJsonObject{
         {QStringLiteral("provider"), QStringLiteral("zai")},
-        {QStringLiteral("accountKey"), hashKey(QStringLiteral("zai"), key)},
-        {QStringLiteral("source"), QStringLiteral("api")},
-        {QStringLiteral("status"), QStringLiteral("ok")},
-        {QStringLiteral("region"), region},
-        {QStringLiteral("windows"), windows}
+        {QStringLiteral("accountKey"), accountKey},
+        {QStringLiteral("accountLabel"), plan},
+        {QStringLiteral("source"), source},
+        {QStringLiteral("status"), status},
+        {QStringLiteral("windows"), windows},
+        {QStringLiteral("region"), region}
     });
 }
 

@@ -37,7 +37,8 @@ private:
     void applyTodayPartial(qint64 gen, const QStringList &clients, TokscaleScan today);
     void applyWorkerScan(bool full, qint64 gen, const QStringList &clients,
                          TokscaleScan today, TokscaleScan month, TokscaleScan allTime,
-                         QJsonObject wsl);
+                         QJsonObject wsl, TokscaleScan graph);
+    void applyGraphHistory(const QJsonObject &graph);
     void persistAnchor();
     void persistHistory();
     void mergeHistoryDay(const QJsonObject &today);
@@ -51,7 +52,9 @@ private:
     QJsonObject m_anchorToday;
     QJsonObject m_history;
     QString m_lastError;
+    QString m_graphClients;
     qint64 m_generation = 0;
+    qint64 m_lastGraphAt = 0;
     TokscaleRunner m_runner;
     UsageWatcher *m_watcher = nullptr;
     QTimer *m_interval = nullptr;

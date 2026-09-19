@@ -37,6 +37,7 @@ set(TMON_CORE_SOURCES
     src/core/usage/UsageEngine.cpp
     src/core/usage/WslUsage.cpp
     src/core/usage/SelfSync.cpp
+    src/core/usage/ArchiveUsage.cpp
     src/core/usage/LocalParsers.cpp
     src/core/process/Subprocess.cpp
     src/core/net/HttpClient.cpp
@@ -44,6 +45,7 @@ set(TMON_CORE_SOURCES
     src/core/limits/LimitsBurnRate.cpp
     src/core/limits/LimitsRuntime.cpp
     src/core/limits/Providers.cpp
+    src/core/limits/ZcodeDiscovery.cpp
     src/core/limits/SpendStore.cpp
     src/core/hub/HubServer.cpp
     src/core/hub/HubClient.cpp

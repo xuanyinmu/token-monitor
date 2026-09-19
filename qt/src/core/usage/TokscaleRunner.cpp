@@ -49,8 +49,20 @@ TokscaleScan parseOutput(const SubprocessResult &run)
 } // namespace
 
 TokscaleRunner::TokscaleRunner(QString binary)
-    : m_binary(std::move(binary))
+    : TokscaleRunner(std::move(binary), QString())
 {
+}
+
+TokscaleRunner::TokscaleRunner(QString binary, QString extraDirsEnv)
+    : m_binary(std::move(binary))
+    , m_extraDirsEnv(std::move(extraDirsEnv))
+{
+}
+
+QMap<QString, QString> runnerEnv(const QString &extraDirsEnv)
+{
+    if (extraDirsEnv.isEmpty()) return {};
+    return {{QStringLiteral("TOKSCALE_EXTRA_DIRS"), extraDirsEnv}};
 }
 
 TokscaleScan TokscaleRunner::scan(const QStringList &clients, const QStringList &extraArgs) const
@@ -62,6 +74,7 @@ TokscaleScan TokscaleRunner::scan(const QStringList &clients, const QStringList 
         empty.json = QJsonObject{};
         return empty;
     }
+    const auto env = runnerEnv(m_extraDirsEnv);
     auto runOnce = [&](const QString &grouping) {
         QStringList args{
             QStringLiteral("--json"),
@@ -69,7 +82,7 @@ TokscaleScan TokscaleRunner::scan(const QStringList &clients, const QStringList 
             QStringLiteral("--group-by"), grouping
         };
         args.append(extraArgs);
-        return runProcess(m_binary, args, kTokscaleTimeoutMs);
+        return runProcess(m_binary, args, kTokscaleTimeoutMs, {}, env);
     };
 
     auto result = parseOutput(runOnce(m_grouping));
@@ -95,6 +108,27 @@ TokscaleScan TokscaleRunner::scanMonth(const QStringList &clients) const
 TokscaleScan TokscaleRunner::scanSince(const QStringList &clients, const QString &since) const
 {
     return scan(clients, {QStringLiteral("--since"), since});
+}
+
+TokscaleScan TokscaleRunner::scanGraph(const QStringList &clients) const
+{
+    // Electron runTokscaleGraph: `tokscale graph --client <csv> --no-spinner`
+    // (stdout is JSON; no --group-by and no grouping retry).
+    const auto csv = filterClients(clients).join(QLatin1Char(','));
+    if (csv.isEmpty()) {
+        TokscaleScan empty;
+        empty.ok = true;
+        empty.json = QJsonObject{};
+        return empty;
+    }
+    QStringList args{
+        QStringLiteral("graph"),
+        QStringLiteral("--client"), csv,
+        QStringLiteral("--no-spinner")
+    };
+    const auto result = parseOutput(runProcess(m_binary, args, kTokscaleTimeoutMs, {},
+                                               runnerEnv(m_extraDirsEnv)));
+    return result;
 }
 
 } // namespace tmon

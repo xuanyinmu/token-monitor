@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QJsonObject>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -37,5 +38,7 @@ QString limitProviderLabel(const QString &id);
 QString limitProviderSettingsLabel(const QString &id);
 QString limitProviderForClient(const QString &clientId);
 QStringList tokscaleScanClientIds(const QString &clientId);
+QStringList tokscaleCustomScanClientIds(const QString &clientId);
+QString tokscaleExtraDirsEnv(const QJsonObject &customScanPaths);
 
 } // namespace tmon

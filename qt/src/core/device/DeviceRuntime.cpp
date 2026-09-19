@@ -1,12 +1,17 @@
 #include "core/device/DeviceRuntime.h"
 
+#include "core/catalog/Catalog.h"
+#include "core/io/JsonIo.h"
 #include "core/io/PidFile.h"
 #include "core/io/Paths.h"
 #include "core/tmon.h"
+#include "core/usage/ArchiveUsage.h"
 #include "core/usage/UsageNormalize.h"
 
 #include <QDateTime>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QHostInfo>
 #include <QJsonArray>
 #include <QUrl>
@@ -66,6 +71,18 @@ void DeviceRuntime::refreshLimits() { m_limits.refresh(); }
 QJsonObject DeviceRuntime::deviceRecord() const
 {
     auto rec = m_usage.snapshot();
+    // Electron transformUsage (summaryWithArchivesApplied): untracked clients'
+    // archived usage and sessions retained past live-scan windows fold back
+    // into today/month/allTime; allTime applies unconditionally.
+    const auto settings = m_settings;
+    QStringList activeClients;
+    for (const auto &id : settings.value(QStringLiteral("clients")).toString(defaultClientsCsv())
+                             .split(QLatin1Char(','), Qt::SkipEmptyParts))
+        activeClients.append(id.trimmed().toLower());
+    applyArchivedClientUsageToRecord(rec, settings.value(QStringLiteral("archivedClientUsage")).toObject(),
+                                     activeClients);
+    if (settings.value(QStringLiteral("sessionUsageArchiveEnabled")).toBool(true))
+        applySessionUsageArchiveToRecord(rec, sessionArchive());
     rec.insert(QStringLiteral("limits"), m_limits.snapshot());
     rec.insert(QStringLiteral("agentRuntime"), QStringLiteral("qt-widget"));
     rec.insert(QStringLiteral("periods"), QJsonObject{
@@ -74,6 +91,32 @@ QJsonObject DeviceRuntime::deviceRecord() const
         {QStringLiteral("allTime"), rec.value(QStringLiteral("allTime"))}
     });
     return rec;
+}
+
+// Electron sessionUsageArchivePath: shared data dir next to the daily history
+// archive; this install keeps it in userData, so both locations are probed.
+QJsonObject DeviceRuntime::sessionArchive() const
+{
+    const auto path = QDir(Paths::userDataDir()).filePath(QStringLiteral("session-usage-archive.json"));
+    QFileInfo info(path);
+    if (!info.exists()) {
+        const auto fallback = QDir(Paths::sharedDataDir()).filePath(QStringLiteral("session-usage-archive.json"));
+        info.setFile(fallback);
+        if (!info.exists()) {
+            m_sessionArchive = {};
+            m_sessionArchiveMtime = 0;
+            return {};
+        }
+        m_sessionArchive = readJsonObject(fallback);
+        m_sessionArchiveMtime = info.lastModified().toMSecsSinceEpoch();
+        return m_sessionArchive;
+    }
+    const qint64 mtime = info.lastModified().toMSecsSinceEpoch();
+    if (mtime != m_sessionArchiveMtime) {
+        m_sessionArchive = readJsonObject(path);
+        m_sessionArchiveMtime = mtime;
+    }
+    return m_sessionArchive;
 }
 
 QJsonObject DeviceRuntime::displayStats() const

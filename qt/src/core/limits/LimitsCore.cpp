@@ -57,6 +57,20 @@ QJsonObject normalizeLimitWindow(const QJsonObject &input)
         out.insert(QStringLiteral("metric"), metric);
     if (input.contains(QStringLiteral("currency")))
         out.insert(QStringLiteral("currency"), input.value(QStringLiteral("currency")).toString().toUpper().left(8));
+    // Boundary presentation fields (Electron core.js keeps all of these):
+    // boundaryKind tells a replenishing reset from a grant expiry,
+    // windowMinutes feeds burn-rate scheduling, resetDescription carries
+    // cadence labels ("Monthly").
+    if (!input.value(QStringLiteral("limitId")).toString().isEmpty())
+        out.insert(QStringLiteral("limitId"), input.value(QStringLiteral("limitId")).toString());
+    const auto boundaryKind = input.value(QStringLiteral("boundaryKind")).toString();
+    if (!boundaryKind.isEmpty()) out.insert(QStringLiteral("boundaryKind"), boundaryKind);
+    if (input.value(QStringLiteral("windowMinutes")).isDouble())
+        out.insert(QStringLiteral("windowMinutes"), input.value(QStringLiteral("windowMinutes")).toDouble());
+    if (input.contains(QStringLiteral("resetDescription")))
+        out.insert(QStringLiteral("resetDescription"), input.value(QStringLiteral("resetDescription")).toString());
+    if (input.contains(QStringLiteral("detail")))
+        out.insert(QStringLiteral("detail"), input.value(QStringLiteral("detail")).toString());
     return out;
 }
 

@@ -1,5 +1,6 @@
 #include "core/catalog/Catalog.h"
 
+#include <QJsonArray>
 #include <QMap>
 #include <QSet>
 
@@ -168,6 +169,37 @@ QStringList tokscaleScanClientIds(const QString &clientId)
     if (clientId == QLatin1String("pi")) return {QStringLiteral("pi"), QStringLiteral("omp")};
     if (clientId == QLatin1String("kilo")) return {QStringLiteral("kilo"), QStringLiteral("kilocode")};
     return {clientId};
+}
+
+// Electron tokscaleCustomScanClientIds: custom roots attach to one concrete
+// tokscale client only (OMP delegates to Pi's parser; Kilo reads a fixed DB),
+// so forwarding the same root to the whole group would parse files twice.
+QStringList tokscaleCustomScanClientIds(const QString &clientId)
+{
+    if (clientId == QLatin1String("pi")) return {QStringLiteral("pi")};
+    if (clientId == QLatin1String("kilo")) return {QStringLiteral("kilocode")};
+    return tokscaleScanClientIds(clientId);
+}
+
+// Electron tokscaleExtraDirsEnv: settings.customScanPaths → the
+// TOKSCALE_EXTRA_DIRS env the tokscale CLI consumes.
+QString tokscaleExtraDirsEnv(const QJsonObject &customScanPaths)
+{
+    QStringList additions;
+    for (auto it = customScanPaths.begin(); it != customScanPaths.end(); ++it) {
+        const auto paths = it.value().toArray();
+        for (const auto &path : paths) {
+            const auto dir = path.toString().trimmed();
+            if (dir.isEmpty()) continue;
+            for (const auto &scanId : tokscaleCustomScanClientIds(it.key()))
+                additions.append(scanId + QLatin1Char(':') + dir);
+        }
+    }
+    const auto inherited = qEnvironmentVariable("TOKSCALE_EXTRA_DIRS").trimmed();
+    QStringList all;
+    if (!inherited.isEmpty()) all.append(inherited);
+    all.append(additions);
+    return all.join(QLatin1Char(','));
 }
 
 } // namespace tmon

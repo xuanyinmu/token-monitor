@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QMap>
 #include <QString>
 #include <QStringList>
 
@@ -15,6 +16,7 @@ struct SubprocessResult {
 };
 
 SubprocessResult runProcess(const QString &program, const QStringList &args,
-                            int timeoutMs, const QString &workingDir = {});
+                            int timeoutMs, const QString &workingDir = {},
+                            const QMap<QString, QString> &extraEnv = {});
 
 } // namespace tmon

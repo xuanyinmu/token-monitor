@@ -3,6 +3,7 @@
 #include "core/hub/HubClient.h"
 #include "core/hub/HubServer.h"
 #include "core/limits/LimitsRuntime.h"
+#include "core/usage/ArchiveUsage.h"
 #include "core/usage/UsageEngine.h"
 
 #include <QJsonObject>
@@ -33,6 +34,7 @@ signals:
 private:
     void compose();
     void maybeUpload();
+    QJsonObject sessionArchive() const;
     QJsonObject m_settings;
     UsageEngine m_usage;
     LimitsRuntime m_limits;
@@ -40,6 +42,8 @@ private:
     HubServer *m_hubServer = nullptr;
     HubClient m_hubClient;
     QJsonObject m_remoteStats;
+    mutable QJsonObject m_sessionArchive;
+    mutable qint64 m_sessionArchiveMtime = 0;
     QString m_mode;
 };
 
