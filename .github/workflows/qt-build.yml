@@ -1,8 +1,23 @@
 name: Qt build (Windows)
 
 # Unsigned Qt/native Windows build for this fork (and other non-upstream
-# clones), mirroring the windows-exe.yml fork guard. Produces a ready-to-run
-# TokenMonitorQt deployment plus the hub/agent CLIs as artifacts.
+# clones), mirroring the windows-exe.yml fork guard.
+#
+# The job no longer uploads a loose dump of qt/build. That dump was not usable
+# on a clean machine: it had no sqldrivers/qsqlite.dll (Cursor's state.vscdb
+# fallback and Qoder CN usage silently returned nothing), no MSVC runtime
+# (windeployqt drops vc_redist.x64.exe instead of the CRT DLLs, and the old
+# upload glob skipped it), and no tokscale.exe (the widget has no self-download
+# path, so usage collection reported tokscale_missing forever).
+#
+# qt/scripts/package.ps1 now builds both deliverables from one staged
+# deployment and smoke-tests them with PATH stripped to System32, so passing
+# this job means the artifacts run by themselves:
+#   * Token-Monitor-Qt-Setup-<version>.exe   NSIS installer, per-user, with a
+#     zero-residue uninstaller
+#   * Token-Monitor-Qt-<version>-win-x64-portable.zip   extract and run
+# -VerifyInstall additionally installs, smoke-tests, uninstalls and asserts
+# that nothing is left behind (and restores the pre-test state).
 
 on:
   workflow_dispatch:
@@ -22,7 +37,7 @@ jobs:
   qt-windows:
     if: github.repository != 'Javis603/token-monitor'
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     defaults:
       run:
         shell: pwsh
@@ -39,6 +54,12 @@ jobs:
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
+      # windows-latest may be windows-2025, which does not preinstall NSIS, and
+      # package.ps1 locates makensis by path rather than by PATH so the choco
+      # shim does not have to be visible here.
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
       - name: Configure
         run: cmake -S qt -B qt/build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
@@ -46,34 +67,26 @@ jobs:
         run: cmake --build qt/build
 
       - name: Checks
-        run: |
-          ./qt/build/TokenMonitorDeltaCheck.exe
-          ./qt/build/TokenMonitorHubCheck.exe
-          ./qt/build/TokenMonitorBurnCheck.exe
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./qt/scripts/checks.ps1
 
-      - name: Deploy runtime
-        working-directory: qt/build
-        run: |
-          windeployqt --release --qmldir ../qml --no-translations TokenMonitorQt.exe
-          windeployqt --release --no-translations TokenMonitorHub.exe
-          windeployqt --release --no-translations TokenMonitorAgent.exe
+      - name: Package (installer, portable zip, smoke test, install/uninstall verification)
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./qt/scripts/package.ps1 -SkipBuild -SkipChecks -VerifyInstall
 
-      - name: Upload Qt widget
+      - name: Upload Qt installer
         uses: actions/upload-artifact@v4
         with:
-          name: token-monitor-qt-win
+          name: token-monitor-qt-installer
           if-no-files-found: error
-          retention-days: 14
-          path: |
-            qt/build/TokenMonitor*.exe
-            qt/build/*.dll
-            qt/build/platforms/
-            qt/build/styles/
-            qt/build/tls/
-            qt/build/imageformats/
-            qt/build/iconengines/
-            qt/build/networkinformation/
-            qt/build/qml/
+          retention-days: 30
+          path: qt/out/Token-Monitor-Qt-Setup-*.exe
+
+      - name: Upload Qt portable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: token-monitor-qt-portable
+          if-no-files-found: error
+          retention-days: 30
+          path: qt/out/Token-Monitor-Qt-*-portable.zip
 
       - name: Upload checks log
         if: always()
