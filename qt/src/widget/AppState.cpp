@@ -45,6 +45,16 @@ bool jsonFlag(const QJsonValue &value, bool fallback);
 
 namespace {
 
+#ifdef Q_OS_WIN
+// The HKCU Run value has to be quoted: the installer's default path contains a
+// space ("...\Programs\Token Monitor Qt\TokenMonitorQt.exe"), and the Run key's
+// parser splits an unquoted path, so an unquoted entry silently never starts.
+QString startAtLoginCommand()
+{
+    return QStringLiteral("\"%1\"").arg(QDir::toNativeSeparators(QCoreApplication::applicationFilePath()));
+}
+#endif
+
 QVariantMap rowOf(const QString &id, const QString &label, double tokens, double cost, double total)
 {
     return QVariantMap{
@@ -1068,7 +1078,7 @@ void AppState::updateSetting(const QString &key, const QVariant &value)
 #ifdef Q_OS_WIN
         QSettings run(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"), QSettings::NativeFormat);
         if (value.toBool())
-            run.setValue(QStringLiteral("TokenMonitor"), QDir::toNativeSeparators(QCoreApplication::applicationFilePath()));
+            run.setValue(QStringLiteral("TokenMonitor"), startAtLoginCommand());
         else
             run.remove(QStringLiteral("TokenMonitor"));
 #endif
@@ -1556,7 +1566,7 @@ void AppState::startAtLogin(bool on)
 {
 #ifdef Q_OS_WIN
     QSettings run(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"), QSettings::NativeFormat);
-    if (on) run.setValue(QStringLiteral("TokenMonitor"), QDir::toNativeSeparators(QCoreApplication::applicationFilePath()));
+    if (on) run.setValue(QStringLiteral("TokenMonitor"), startAtLoginCommand());
     else run.remove(QStringLiteral("TokenMonitor"));
 #endif
     updateSetting(QStringLiteral("startAtLogin"), on);

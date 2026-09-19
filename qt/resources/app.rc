@@ -1,0 +1,9 @@
+// Executable icon for the widget. Without this the exe carries no icon
+// resource, so the taskbar, Alt-Tab, Start-menu shortcut and "Apps & features"
+// entry all fall back to the generic Windows application icon.
+//
+// app.ico is the multi-size (16/24/32/48/64/128/256) conversion of
+// assets/icon-win.png - the same artwork electron-builder turns into the
+// Electron installer's icon. The NSIS script points at this one file too, so
+// the installed product has a single icon source.
+1 ICON "app.ico"

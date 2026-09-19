@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.21)
 project(TokenMonitorQt VERSION 0.57.0 LANGUAGES CXX)
 
+# The widget carries its own icon resource (resources/app.rc). RC needs rc.exe
+# from the MSVC/Windows SDK toolchain, which only exists on Windows, so it is
+# enabled here rather than in project() — a configure on another platform must
+# not fail just because this Windows-first tree has no resource compiler.
+if(WIN32)
+    enable_language(RC)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -113,7 +121,11 @@ set(TMON_WIDGET_SOURCES
 
 # Windowed subsystem: double-clicking the exe must not open a console.
 # --scan-once reattaches to the parent console at runtime (main.cpp).
-add_executable(TokenMonitor WIN32 ${TMON_WIDGET_SOURCES})
+set(TMON_RC_SOURCES)
+if(WIN32)
+    list(APPEND TMON_RC_SOURCES resources/app.rc)
+endif()
+add_executable(TokenMonitor WIN32 ${TMON_WIDGET_SOURCES} ${TMON_RC_SOURCES})
 set_target_properties(TokenMonitor PROPERTIES OUTPUT_NAME TokenMonitorQt)
 target_include_directories(TokenMonitor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(TokenMonitor PRIVATE
