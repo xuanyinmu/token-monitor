@@ -445,6 +445,17 @@ Set-Content -LiteralPath $qtOwnedProbe -Value '{"probe":true}' -Encoding ascii
 
 Invoke-SilentExecutable -FilePath $InstallerPath -Arguments "/S /D=$InstallDir" -What 'the installer'
 & (Join-Path $ScriptDir 'smoke-test.ps1') -Dir $InstallDir -Label 'installed (keepdata pass)'
+
+# Snapshot what the uninstaller is about to look at, instead of assuming what a
+# profile contains. A clean machine has no settings.json at all - the widget only
+# writes one once a setting changes - so "the directory existed before the run"
+# says nothing about which files are in it. What is checkable is the delta: every
+# file that is not Qt-owned must survive /KEEPDATA.
+$beforeKeepData = @(Get-ChildItem -LiteralPath $AppDataDir -File -Force -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty Name)
+$qtOwnedNames = @('limits-snapshot.json', 'tokscale.exe')
+$sharedBefore = @($beforeKeepData | Where-Object { $qtOwnedNames -notcontains $_ -and $_ -notlike 'qt-*' })
+
 Invoke-SilentExecutable -FilePath (Join-Path $InstallDir 'Uninstall.exe') -Arguments '/S /KEEPDATA' -What 'the uninstaller'
 
 Assert-Gone $InstallDir 'the install directory (keepdata pass)'
@@ -461,10 +472,10 @@ Assert-PathAbsent (Join-Path $AppDataDir 'tokscale.exe') 'the Qt-installed toksc
 if (Test-Path -LiteralPath (Join-Path $AppDataDir 'qt-*.json')) {
     throw "Uninstall left Qt scratch files behind: $AppDataDir\qt-*.json"
 }
-if ($state.Data[0].Existed) {
-    Assert-PathExists (Join-Path $AppDataDir 'settings.json') 'settings.json kept by /KEEPDATA'
-    Assert-PathExists (Join-Path $AppDataDir 'Local State') "the Electron build's Chromium profile marker"
+foreach ($name in $sharedBefore) {
+    Assert-PathExists (Join-Path $AppDataDir $name) "the shared file '$name' kept by /KEEPDATA"
 }
+Write-Host ("  /KEEPDATA kept {0} non-Qt file(s): {1}" -f $sharedBefore.Count, ($sharedBefore -join ', '))
 Get-SavedRunValue -State $state
 Write-Host '  /KEEPDATA removed the Qt-owned files and kept the shared ones'
 
