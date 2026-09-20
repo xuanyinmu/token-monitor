@@ -216,7 +216,14 @@ function Backup-State {
         UninstallKeyExported = $false
     }
 
-    if (Test-Path -LiteralPath $BackupRoot) { Remove-Item -LiteralPath $BackupRoot -Recurse -Force }
+    # A failed run keeps its backup (it is the only copy of the user data this test
+    # moved), so the next run must not overwrite it: the old one is moved aside first.
+    if (Test-Path -LiteralPath $BackupRoot) {
+        $previous = "$BackupRoot-prev"
+        Remove-Item -LiteralPath $previous -Recurse -Force -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $BackupRoot -Destination $previous -Force
+        Write-Host "  previous backup kept at $previous"
+    }
     New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null
 
     foreach ($dir in $DataDirs) {
@@ -296,7 +303,7 @@ function Assert-ManifestsMatch {
         }
         for ($i = 0; $i -lt $expected.Count; $i++) {
             if ($expected[$i] -ne $actual[$i]) {
-                throw "Restore mismatch for $($entry.Path):$($expected[$i]) vs $($actual[$i])"
+                throw "Restore mismatch for $($entry.Path):$($expected[$i]) vs $($actual[$i]). The backup is kept at $BackupRoot."
             }
         }
         Write-Host "  restored and re-hashed $($entry.Path) ($($actual.Count) files)"
@@ -309,14 +316,49 @@ function Invoke-SilentExecutable {
     if ($proc.ExitCode -ne 0) { throw "$What exited with code $($proc.ExitCode)" }
 }
 
+function Get-RunValue {
+    param([string]$Name)
+    if (-not (Test-Path -LiteralPath $RunKeyPath)) { return '' }
+    $value = (Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).$Name
+    if ($null -eq $value) { return '' }
+    return [string]$value
+}
+
+# Other programs own their own Run values, and they can change them at any moment:
+# the Electron build itself rewrites (or removes) its login item whenever it applies
+# its startAtLogin setting. So the assertion has to be about what OUR install/uninstall
+# does, inside the window where only our code runs:
+#   - a sentinel value nothing else writes must survive both, which is what rules out
+#     "the uninstaller wiped the Run key";
+#   - the Electron value is compared immediately before and after the uninstall call;
+#   - a change relative to the startup snapshot is reported as a warning, not a
+#     failure, because attribution is impossible that far apart in time.
+$SentinelName = 'TokenMonitorVerifySentinel'
+$SentinelValue = '"C:\tmon-verify-sentinel\keep.exe"'
+
+function Assert-SentinelIntact {
+    param([string]$Where)
+    $current = Get-RunValue $SentinelName
+    if ($current -ne $SentinelValue) {
+        throw "The $Where disturbed other Run values: '$SentinelName' is now '$current' (expected '$SentinelValue')."
+    }
+}
+
 function Get-SavedRunValue {
-    param($State)
-    # The Electron build's own login item must survive every uninstall pass.
+    param($State, [string]$Current)
+    # Warning only: the Electron login item may legitimately change on its own during a
+    # run that takes minutes. The strict check is the before/after comparison around the
+    # uninstall call (see Test-UninstallWindow).
     if (-not $State.ElectronRunValue) { return }
-    if (-not (Test-Path -LiteralPath $RunKeyPath)) { throw 'The uninstaller removed the whole HKCU Run key.' }
-    $current = (Get-ItemProperty -Path $RunKeyPath).$ElectronRunValueName
-    if ($current -ne $State.ElectronRunValue) {
-        throw "Uninstall disturbed the Electron login item '$ElectronRunValueName' (was '$($State.ElectronRunValue)', now '$current')."
+    if ($Current -ne $State.ElectronRunValue) {
+        Write-Warning "The Electron login item '$ElectronRunValueName' changed during the run (backup: '$($State.ElectronRunValue)', now: '$Current'). That happens outside our code - the Electron build applies its own startAtLogin setting - so it is only reported, not treated as a failure."
+    }
+}
+
+function Assert-UninstallWindow {
+    param([string]$Before, [string]$After)
+    if ($Before -ne $After) {
+        throw "The uninstaller changed the Electron login item '$ElectronRunValueName' while it ran ('$Before' -> '$After'). If the Electron build was starting or applying its settings at the same moment, re-run to confirm."
     }
 }
 
@@ -388,53 +430,73 @@ Write-Step "B. Silent install into $InstallDir"
 # while settings.json said startAtLogin: false - and the widget's own switch showed
 # "off" and could not explain it. Autostart belongs to the widget setting alone, so
 # this compares the HKCU value before and after the install instead of expecting one.
-$runBeforeInstall = (Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).$RunValueName
-Invoke-SilentExecutable -FilePath $InstallerPath -Arguments "/S /D=$InstallDir" -What 'the installer'
-$runAfterInstall = (Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).$RunValueName
-if ($runAfterInstall -ne $runBeforeInstall) {
-    throw "The installer changed the HKCU Run value '$RunValueName' ('$runBeforeInstall' -> '$runAfterInstall'); autostart belongs to the widget's own startAtLogin setting."
+# The sentinel proves the same thing for values that belong to other programs.
+$passError = $null
+$electronBeforeInstall = Get-RunValue $ElectronRunValueName
+try {
+    New-Item -Path $RunKeyPath -Force | Out-Null
+    Set-ItemProperty -Path $RunKeyPath -Name $SentinelName -Value $SentinelValue
+
+    $runBeforeInstall = Get-RunValue $RunValueName
+    Invoke-SilentExecutable -FilePath $InstallerPath -Arguments "/S /D=$InstallDir" -What 'the installer'
+    $runAfterInstall = Get-RunValue $RunValueName
+    if ($runAfterInstall -ne $runBeforeInstall) {
+        throw "The installer changed the HKCU Run value '$RunValueName' ('$runBeforeInstall' -> '$runAfterInstall'); autostart belongs to the widget's own startAtLogin setting."
+    }
+    Assert-SentinelIntact 'installer'
+
+    Assert-PathExists (Join-Path $InstallDir 'TokenMonitorQt.exe') 'the widget'
+    Assert-PathExists (Join-Path $InstallDir 'TokenMonitorHub.exe') 'the hub CLI'
+    Assert-PathExists (Join-Path $InstallDir 'TokenMonitorAgent.exe') 'the agent CLI'
+    Assert-PathExists (Join-Path $InstallDir 'tokscale.exe') 'the bundled tokscale scanner'
+    Assert-PathExists (Join-Path $InstallDir 'msvcp140.dll') 'the app-local MSVC runtime'
+    Assert-PathExists (Join-Path $InstallDir 'sqldrivers\qsqlite.dll') 'the SQLite driver plugin'
+    Assert-PathExists (Join-Path $InstallDir 'Uninstall.exe') 'the uninstaller'
+    Assert-PathExists $ShortcutPaths[0] 'the Start-menu shortcut'
+    Assert-PathExists $UninstallKeyPath 'the "Apps & features" entry'
+    Write-Host '  installed files, shortcuts and uninstall entry are present; the installer left autostart and other Run values alone'
+
+    & (Join-Path $ScriptDir 'smoke-test.ps1') -Dir $InstallDir -Label 'installed'
+
+    Write-Step 'B. Silent uninstall (/S: remove everything, shared data included)'
+
+    # An entry that points into this install directory is ours to clean up: uninstalling
+    # must not leave a stale autostart pointing at a deleted exe.
+    New-Item -Path $RunKeyPath -Force | Out-Null
+    $insideRunValue = '"' + (Join-Path $InstallDir 'TokenMonitorQt.exe') + '"'
+    Set-ItemProperty -Path $RunKeyPath -Name $RunValueName -Value $insideRunValue
+
+    $electronBeforeUninstall = Get-RunValue $ElectronRunValueName
+    Invoke-SilentExecutable -FilePath (Join-Path $InstallDir 'Uninstall.exe') -Arguments '/S' -What 'the uninstaller'
+    Assert-UninstallWindow -Before $electronBeforeUninstall -After (Get-RunValue $ElectronRunValueName)
+
+    Assert-Gone $InstallDir 'the install directory'
+    Assert-Gone $ShortcutPaths[0] 'the Start-menu shortcut'
+    Assert-Gone $ShortcutPaths[1] 'the desktop shortcut'
+    Assert-Gone $AppDataDir 'the shared user data directory (silent uninstall deletes it by contract)'
+    Assert-Gone $LocalDataDir 'the Qt cache directory under %LOCALAPPDATA%'
+    Assert-Gone $JavisCacheDir "Qt's %LOCALAPPDATA%\Javis cache directory"
+    Assert-Gone $UninstallKeyPath 'the "Apps & features" entry'
+    $runAfterUninstall = Get-RunValue $RunValueName
+    if ($runAfterUninstall) {
+        throw "Uninstall left the autostart entry '$runAfterUninstall' behind, which pointed into $InstallDir."
+    }
+    Assert-SentinelIntact 'uninstaller'
+    Get-SavedRunValue -State $state -Current (Get-RunValue $ElectronRunValueName)
+    Write-Host '  no residue: install dir, shortcuts, autostart value, uninstall entry, data and caches are gone; other Run values untouched'
+} catch {
+    $passError = $_
 }
-
-Assert-PathExists (Join-Path $InstallDir 'TokenMonitorQt.exe') 'the widget'
-Assert-PathExists (Join-Path $InstallDir 'TokenMonitorHub.exe') 'the hub CLI'
-Assert-PathExists (Join-Path $InstallDir 'TokenMonitorAgent.exe') 'the agent CLI'
-Assert-PathExists (Join-Path $InstallDir 'tokscale.exe') 'the bundled tokscale scanner'
-Assert-PathExists (Join-Path $InstallDir 'msvcp140.dll') 'the app-local MSVC runtime'
-Assert-PathExists (Join-Path $InstallDir 'sqldrivers\qsqlite.dll') 'the SQLite driver plugin'
-Assert-PathExists (Join-Path $InstallDir 'Uninstall.exe') 'the uninstaller'
-Assert-PathExists $ShortcutPaths[0] 'the Start-menu shortcut'
-Assert-PathExists $UninstallKeyPath 'the "Apps & features" entry'
-Write-Host '  installed files, shortcuts and uninstall entry are present; the installer left autostart alone'
-
-& (Join-Path $ScriptDir 'smoke-test.ps1') -Dir $InstallDir -Label 'installed'
-
-Write-Step 'B. Silent uninstall (/S: remove everything, shared data included)'
-
-# An entry that points into this install directory is ours to clean up: uninstalling
-# must not leave a stale autostart pointing at a deleted exe.
-New-Item -Path $RunKeyPath -Force | Out-Null
-$insideRunValue = '"' + (Join-Path $InstallDir 'TokenMonitorQt.exe') + '"'
-Set-ItemProperty -Path $RunKeyPath -Name $RunValueName -Value $insideRunValue
-
-Invoke-SilentExecutable -FilePath (Join-Path $InstallDir 'Uninstall.exe') -Arguments '/S' -What 'the uninstaller'
-
-Assert-Gone $InstallDir 'the install directory'
-Assert-Gone $ShortcutPaths[0] 'the Start-menu shortcut'
-Assert-Gone $ShortcutPaths[1] 'the desktop shortcut'
-Assert-Gone $AppDataDir 'the shared user data directory (silent uninstall deletes it by contract)'
-Assert-Gone $LocalDataDir 'the Qt cache directory under %LOCALAPPDATA%'
-Assert-Gone $JavisCacheDir "Qt's %LOCALAPPDATA%\Javis cache directory"
-Assert-Gone $UninstallKeyPath 'the "Apps & features" entry'
-$runAfterUninstall = (Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).$RunValueName
-if ($runAfterUninstall) {
-    throw "Uninstall left the autostart entry '$runAfterUninstall' behind, which pointed into $InstallDir."
-}
-Get-SavedRunValue -State $state
-Write-Host '  no residue: install dir, shortcuts, autostart value, uninstall entry, data and caches are gone'
 
 Write-Step 'Restoring the machine state'
+Remove-ItemProperty -Path $RunKeyPath -Name $SentinelName -ErrorAction SilentlyContinue
+$electronAfterPass = Get-RunValue $ElectronRunValueName
+if ($electronAfterPass -ne $electronBeforeInstall) {
+    Write-Warning "The Electron login item '$ElectronRunValueName' changed during pass B (before: '$electronBeforeInstall', now: '$electronAfterPass'). Our code only ever writes '$RunValueName'."
+}
 Restore-State -State $state
 Assert-ManifestsMatch -State $state
+if ($passError) { throw $passError }
 
 # ---------------------------------------------------------------------------
 # C. /KEEPDATA keeps the files shared with the Electron build
@@ -458,52 +520,70 @@ Set-Content -LiteralPath $qtOwnedProbe -Value '{"probe":true}' -Encoding ascii
 
 # An autostart entry that points somewhere else belongs to another copy (a portable
 # build, a second install). The widget may adopt it into settings, but neither the
-# installer nor the uninstaller may repoint or delete it.
+# installer nor the uninstaller may repoint or delete it. The sentinel covers the
+# same ground for values that belong to entirely different programs.
 New-Item -Path $RunKeyPath -Force | Out-Null
 $foreignRunValue = '"C:\tmon-elsewhere\TokenMonitorQt.exe"'
 Set-ItemProperty -Path $RunKeyPath -Name $RunValueName -Value $foreignRunValue
+Set-ItemProperty -Path $RunKeyPath -Name $SentinelName -Value $SentinelValue
 
-Invoke-SilentExecutable -FilePath $InstallerPath -Arguments "/S /D=$InstallDir" -What 'the installer'
-& (Join-Path $ScriptDir 'smoke-test.ps1') -Dir $InstallDir -Label 'installed (keepdata pass)'
+$passError = $null
+$electronBeforePassC = Get-RunValue $ElectronRunValueName
+try {
+    Invoke-SilentExecutable -FilePath $InstallerPath -Arguments "/S /D=$InstallDir" -What 'the installer'
+    Assert-SentinelIntact 'installer (keepdata pass)'
+    & (Join-Path $ScriptDir 'smoke-test.ps1') -Dir $InstallDir -Label 'installed (keepdata pass)'
 
-# Snapshot what the uninstaller is about to look at, instead of assuming what a
-# profile contains. A clean machine has no settings.json at all - the widget only
-# writes one once a setting changes - so "the directory existed before the run"
-# says nothing about which files are in it. What is checkable is the delta: every
-# file that is not Qt-owned must survive /KEEPDATA.
-$beforeKeepData = @(Get-ChildItem -LiteralPath $AppDataDir -File -Force -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty Name)
-$qtOwnedNames = @('limits-snapshot.json', 'tokscale.exe')
-$sharedBefore = @($beforeKeepData | Where-Object { $qtOwnedNames -notcontains $_ -and $_ -notlike 'qt-*' })
+    # Snapshot what the uninstaller is about to look at, instead of assuming what a
+    # profile contains. A clean machine has no settings.json at all - the widget only
+    # writes one once a setting changes - so "the directory existed before the run"
+    # says nothing about which files are in it. What is checkable is the delta: every
+    # file that is not Qt-owned must survive /KEEPDATA.
+    $beforeKeepData = @(Get-ChildItem -LiteralPath $AppDataDir -File -Force -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty Name)
+    $qtOwnedNames = @('limits-snapshot.json', 'tokscale.exe')
+    $sharedBefore = @($beforeKeepData | Where-Object { $qtOwnedNames -notcontains $_ -and $_ -notlike 'qt-*' })
 
-Invoke-SilentExecutable -FilePath (Join-Path $InstallDir 'Uninstall.exe') -Arguments '/S /KEEPDATA' -What 'the uninstaller'
+    $electronBeforeUninstallC = Get-RunValue $ElectronRunValueName
+    Invoke-SilentExecutable -FilePath (Join-Path $InstallDir 'Uninstall.exe') -Arguments '/S /KEEPDATA' -What 'the uninstaller'
+    Assert-UninstallWindow -Before $electronBeforeUninstallC -After (Get-RunValue $ElectronRunValueName)
 
-Assert-Gone $InstallDir 'the install directory (keepdata pass)'
-Assert-Gone $ShortcutPaths[0] 'the Start-menu shortcut (keepdata pass)'
-Assert-Gone $LocalDataDir 'the Qt cache directory (keepdata pass)'
-Assert-Gone $qtOwnedProbe 'the Qt-owned qt-* scratch file (keepdata pass)'
-Assert-PathExists $sharedMarker 'the shared Chromium marker kept by /KEEPDATA'
-$foreignAfter = (Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).$RunValueName
-if ($foreignAfter -ne $foreignRunValue) {
-    throw "Uninstall disturbed an autostart entry that points outside $InstallDir (was '$foreignRunValue', now '$foreignAfter')."
+    Assert-Gone $InstallDir 'the install directory (keepdata pass)'
+    Assert-Gone $ShortcutPaths[0] 'the Start-menu shortcut (keepdata pass)'
+    Assert-Gone $LocalDataDir 'the Qt cache directory (keepdata pass)'
+    Assert-Gone $qtOwnedProbe 'the Qt-owned qt-* scratch file (keepdata pass)'
+    Assert-PathExists $sharedMarker 'the shared Chromium marker kept by /KEEPDATA'
+    $foreignAfter = Get-RunValue $RunValueName
+    if ($foreignAfter -ne $foreignRunValue) {
+        throw "Uninstall disturbed an autostart entry that points outside $InstallDir (was '$foreignRunValue', now '$foreignAfter')."
+    }
+    Assert-SentinelIntact 'uninstaller (keepdata pass)'
+    Write-Host '  the autostart entry pointing outside the install directory, and other programs'' entries, were left alone'
+    Assert-PathAbsent (Join-Path $AppDataDir 'limits-snapshot.json') 'Qt-only limits-snapshot.json'
+    Assert-PathAbsent (Join-Path $AppDataDir 'data') "Qt-only data\ directory"
+    Assert-PathAbsent (Join-Path $AppDataDir 'tokscale.exe') 'the Qt-installed tokscale.exe'
+    if (Test-Path -LiteralPath (Join-Path $AppDataDir 'qt-*.json')) {
+        throw "Uninstall left Qt scratch files behind: $AppDataDir\qt-*.json"
+    }
+    foreach ($name in $sharedBefore) {
+        Assert-PathExists (Join-Path $AppDataDir $name) "the shared file '$name' kept by /KEEPDATA"
+    }
+    Write-Host ("  /KEEPDATA kept {0} non-Qt file(s): {1}" -f $sharedBefore.Count, ($sharedBefore -join ', '))
+    Get-SavedRunValue -State $state -Current (Get-RunValue $ElectronRunValueName)
+    Write-Host '  /KEEPDATA removed the Qt-owned files and kept the shared ones'
+} catch {
+    $passError = $_
 }
-Write-Host '  the autostart entry pointing outside the install directory was left alone'
-Assert-PathAbsent (Join-Path $AppDataDir 'limits-snapshot.json') 'Qt-only limits-snapshot.json'
-Assert-PathAbsent (Join-Path $AppDataDir 'data') "Qt-only data\ directory"
-Assert-PathAbsent (Join-Path $AppDataDir 'tokscale.exe') 'the Qt-installed tokscale.exe'
-if (Test-Path -LiteralPath (Join-Path $AppDataDir 'qt-*.json')) {
-    throw "Uninstall left Qt scratch files behind: $AppDataDir\qt-*.json"
-}
-foreach ($name in $sharedBefore) {
-    Assert-PathExists (Join-Path $AppDataDir $name) "the shared file '$name' kept by /KEEPDATA"
-}
-Write-Host ("  /KEEPDATA kept {0} non-Qt file(s): {1}" -f $sharedBefore.Count, ($sharedBefore -join ', '))
-Get-SavedRunValue -State $state
-Write-Host '  /KEEPDATA removed the Qt-owned files and kept the shared ones'
 
 Write-Step 'Restoring the machine state'
+Remove-ItemProperty -Path $RunKeyPath -Name $SentinelName -ErrorAction SilentlyContinue
+$electronAfterPassC = Get-RunValue $ElectronRunValueName
+if ($electronAfterPassC -ne $electronBeforePassC) {
+    Write-Warning "The Electron login item '$ElectronRunValueName' changed during pass C (before: '$electronBeforePassC', now: '$electronAfterPassC'). Our code only ever writes '$RunValueName'."
+}
 Restore-State -State $state
 Assert-ManifestsMatch -State $state
+if ($passError) { throw $passError }
 
 Write-Host ''
 Write-Host '=== Install verification passed: install, uninstall (full and /KEEPDATA) and restore are consistent ==='
