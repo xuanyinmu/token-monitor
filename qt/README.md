@@ -79,13 +79,15 @@ The uninstaller stops the widget/hub/agent, then removes the install directory, 
 .\qt\scripts\verify-install.ps1 -InstallerPath .\qt\out\Token-Monitor-Qt-Setup-0.57.0.exe
 ```
 
-Refuses to run while a Token Monitor process is alive, backs up `%APPDATA%\Token Monitor`, `%LOCALAPPDATA%\Token Monitor` and `%LOCALAPPDATA%\Javis` (plus the Run value, the uninstall key and the shortcuts) with a SHA256 manifest, then:
+Refuses to run while a Token Monitor process is alive, backs up `%APPDATA%\Token Monitor`, `%LOCALAPPDATA%\Token Monitor` and `%LOCALAPPDATA%\Javis` (plus every HKCU Run value, the uninstall key and the shortcuts) with a SHA256 manifest, then:
 
 - **A** extracts the portable ZIP (asserting the ZIP root has no extra folder) and smoke tests it with an isolated `TOKEN_MONITOR_USER_DATA`;
 - **B** silently installs, checks the installed files/shortcuts/uninstall entry, asserts the installer left the HKCU autostart value **untouched**, smoke tests (including the top-edge self-test), seeds an autostart entry pointing into the install directory, silently uninstalls, and asserts the whole footprint is gone;
 - **C** seeds an autostart entry pointing *outside* the install directory, installs and uninstalls with `/S /KEEPDATA`, and asserts the Qt-owned files are gone, the shared ones (and the Electron-only Chromium markers) survive, and the outside entry was not disturbed.
 
-After each pass the backup is restored and re-hashed: a mismatch is an error, so the destructive part cannot leave the machine changed. `package.ps1 -VerifyInstall` runs this automatically; CI runs it on every build.
+Other programs' Run values are checked in the two windows where only this script runs: a sentinel value (pointing at a real executable, so a startup cleaner has no reason to remove it) must survive each install/uninstall step, and every seeding step compares the set of foreign names across itself, because `New-Item -Force` recreates a registry key and takes its values with it — the bug that once emptied a real Run key. Nothing but `TokenMonitor` and that sentinel is ever written.
+
+After each pass the backup is restored and re-hashed: a mismatch is an error, so the destructive part cannot leave the machine changed. A value that the backup recorded and that is missing afterwards is reported with its command line (it is not put back — the Electron build rewrites its own login item). `package.ps1 -VerifyInstall` runs this automatically; CI runs it on every build.
 
 ## Data
 

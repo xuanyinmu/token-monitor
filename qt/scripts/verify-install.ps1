@@ -16,11 +16,19 @@
        test deletes the directory the running app holds open).
     2. It mirrors %APPDATA%\Token Monitor, %LOCALAPPDATA%\Token Monitor and
        %LOCALAPPDATA%\Javis into qt\out\backup, records a SHA256 manifest of
-       every file, and saves the HKCU Run value, the uninstall registry key and
+       every file, and saves the HKCU Run values (every one of them, so a value
+       lost during a run can at least be named), the uninstall registry key and
        the two shortcuts.
     3. After each uninstall pass it restores that state and re-hashes the tree;
        a mismatch is an error, not a warning. So the destructive part of the
        test cannot leave the machine in a different state than it found it.
+    4. It never creates a registry key that already exists. New-Item -Force is
+       not "make sure this key exists" for a registry key: it recreates the key
+       and drops every value in it, which is how an earlier revision of this
+       script emptied the whole HKCU Run key (the user's Docker Desktop, Steam,
+       Edge and AMD autostart entries) and then failed its own sentinel check.
+       Every write to Run goes through Ensure-RunKey, and each seeding step
+       asserts that no other program's value disappeared across it.
 
   Passes:
     A. portable ZIP: extract, assert the ZIP root has no extra folder, smoke test
@@ -68,6 +76,13 @@ if (-not $PortableZipPath) {
     $candidate = Get-ChildItem -LiteralPath $OutRoot -Filter '*-portable.zip' -ErrorAction SilentlyContinue |
         Sort-Object -Property LastWriteTime -Descending | Select-Object -First 1
     if ($candidate) { $PortableZipPath = $candidate.FullName }
+}
+if (-not $Version) {
+    # The header is the first line of any pasted log, so it should not read
+    # "(version )" just because the caller left -Version out: the artifact name
+    # carries the same number.
+    $versionMatch = [regex]::Match((Split-Path -Leaf $InstallerPath), '\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?')
+    if ($versionMatch.Success) { $Version = $versionMatch.Value }
 }
 
 $AppDataDir = Join-Path $env:APPDATA 'Token Monitor'
@@ -170,9 +185,16 @@ function Assert-VerificationEnvironment {
     if ($shortcutDir -and -not (Test-WritableDir $shortcutDir)) {
         $blocked.Add("write access to $shortcutDir (the installer creates the shortcuts there)")
     }
+    # Probes a value write, not just key creation: the installer stores the uninstall
+    # entry as values and the widget's autostart switch is a value, so creating a key
+    # on its own would not prove the access the run needs. No -Force: an aborted earlier
+    # run can leave this probe key behind, and while -Force would be harmless on our own
+    # key, the rule that no registry key is ever re-created is worth keeping absolute.
+    $probeKey = 'HKCU:\Software\_tmon_environment_probe'
     try {
-        New-Item -Path 'HKCU:\Software\_tmon_environment_probe' -Force -ErrorAction Stop | Out-Null
-        Remove-Item 'HKCU:\Software\_tmon_environment_probe' -Recurse -Force -ErrorAction Stop
+        if (-not (Test-Path -LiteralPath $probeKey)) { New-Item -Path $probeKey -ErrorAction Stop | Out-Null }
+        Set-ItemProperty -Path $probeKey -Name 'probe' -Value 'ok' -ErrorAction Stop
+        Remove-Item $probeKey -Recurse -Force -ErrorAction Stop
     } catch {
         $blocked.Add('write access to HKCU (autostart value and "Apps & features" entry)')
     }
@@ -212,6 +234,7 @@ function Backup-State {
         RunExisted = $false
         RunValue   = $null
         ElectronRunValue = $null
+        RunValues  = [ordered]@{}
         Shortcuts  = @()
         UninstallKeyExported = $false
     }
@@ -245,6 +268,14 @@ function Backup-State {
         if ($properties.PSObject.Properties.Name -contains $ElectronRunValueName) {
             $state.ElectronRunValue = $properties.$ElectronRunValueName
         }
+        # Every value in Run, not just the two we know by name. This is not restored -
+        # other programs own their entries and may change them at any time - but it is
+        # the only record of what was registered if something drops one mid-run, and a
+        # name plus its command is exactly what re-adding it needs.
+        foreach ($property in $properties.PSObject.Properties) {
+            if ($property.Name -like 'PS*') { continue }
+            $state.RunValues[$property.Name] = [string]$property.Value
+        }
     }
 
     foreach ($shortcut in $ShortcutPaths) {
@@ -274,10 +305,22 @@ function Restore-State {
     }
 
     if ($State.RunExisted) {
-        New-Item -Path $RunKeyPath -Force | Out-Null
+        Ensure-RunKey
         Set-ItemProperty -Path $RunKeyPath -Name $RunValueName -Value $State.RunValue
     } else {
         Remove-ItemProperty -Path $RunKeyPath -Name $RunValueName -ErrorAction SilentlyContinue
+    }
+
+    # A value the backup recorded and that is missing now was dropped while the run was
+    # in progress. This does not put it back - other programs own their entries and the
+    # Electron build rewrites its own - but it names what is gone and what it pointed
+    # at, which the key alone cannot say afterwards.
+    $now = @((Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).PSObject.Properties |
+        Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object { $_.Name })
+    $lost = @($State.RunValues.Keys | Where-Object { $now -notcontains $_ -and $_ -ne $SentinelName })
+    if ($lost.Count) {
+        $detail = ($lost | ForEach-Object { "$_ = $($State.RunValues[$_])" }) -join '; '
+        Write-Warning "Run value(s) that the backup recorded are gone now: $detail. This script writes only '$RunValueName' and the temporary '$SentinelName', so either another program removed its own entry (the Electron build applies its login item on start) or something else cleaned up startup entries. The command lines above are what re-adding them needs; the full snapshot is in $BackupRoot\state.json."
     }
 
     foreach ($shortcut in $State.Shortcuts) {
@@ -324,23 +367,92 @@ function Get-RunValue {
     return [string]$value
 }
 
+function Get-RunState {
+    # One line that says whether the key still exists and what is in it: when a
+    # foreign value disappears, this is what tells "value-level cleanup" apart from
+    # "the whole key was removed".
+    if (-not (Test-Path -LiteralPath $RunKeyPath)) { return 'the Run key itself does not exist' }
+    $names = @((Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).PSObject.Properties |
+        Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object { $_.Name })
+    if (-not $names.Count) { return 'the Run key exists but is empty' }
+    return "the Run key holds: $($names -join ', ')"
+}
+
+function Ensure-RunKey {
+    # Never New-Item -Force here. On a registry key, -Force does not mean "make sure
+    # this exists": it recreates the key, and recreating a key drops every value in
+    # it. An earlier revision of this script used it before seeding the sentinel and
+    # before the uninstall call, which silently emptied the whole HKCU Run key -
+    # every other program's autostart entry with it - and then failed its own
+    # sentinel assertion, because the sentinel was one of the values it had dropped.
+    if (-not (Test-Path -LiteralPath $RunKeyPath)) { New-Item -Path $RunKeyPath | Out-Null }
+}
+
+function Get-ForeignRunNames {
+    # Names in Run that this script must never write: everything except our own
+    # autostart value and the temporary sentinel.
+    if (-not (Test-Path -LiteralPath $RunKeyPath)) { return @() }
+    $ours = @($RunValueName, $SentinelName)
+    return @((Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).PSObject.Properties |
+        Where-Object { $_.Name -notlike 'PS*' -and $ours -notcontains $_.Name } |
+        ForEach-Object { $_.Name } | Sort-Object)
+}
+
 # Other programs own their own Run values, and they can change them at any moment:
 # the Electron build itself rewrites (or removes) its login item whenever it applies
-# its startAtLogin setting. So the assertion has to be about what OUR install/uninstall
-# does, inside the window where only our code runs:
+# its startAtLogin setting, and a startup-cleaning utility removes entries it dislikes.
+# So the assertion has to be about what OUR install/uninstall does, inside the window
+# where only our code runs:
 #   - a sentinel value nothing else writes must survive both, which is what rules out
 #     "the uninstaller wiped the Run key";
 #   - the Electron value is compared immediately before and after the uninstall call;
 #   - a change relative to the startup snapshot is reported as a warning, not a
-#     failure, because attribution is impossible that far apart in time.
+#     failure, because attribution is impossible that far apart in time;
+#   - each seeding step compares the set of foreign names across the two statements it
+#     runs in, which is what rules out "this script dropped them itself" (that window is
+#     too short for anything else to be the cause).
 $SentinelName = 'TokenMonitorVerifySentinel'
-$SentinelValue = '"C:\tmon-verify-sentinel\keep.exe"'
+# The sentinel points at a real executable on purpose. An entry whose target does not
+# exist is exactly what a cleanup utility (or a security product's startup cleaner)
+# removes on its own, which would fail this check for a reason that has nothing to do
+# with the installer. The value only lives for the duration of a run and is removed
+# again by the restore step.
+$SentinelTarget = Join-Path $env:SystemRoot 'System32\notepad.exe'
+if (-not (Test-Path -LiteralPath $SentinelTarget)) { $SentinelTarget = Join-Path $env:SystemRoot 'explorer.exe' }
+$SentinelValue = '"' + $SentinelTarget + '"'
 
 function Assert-SentinelIntact {
     param([string]$Where)
     $current = Get-RunValue $SentinelName
     if ($current -ne $SentinelValue) {
-        throw "The $Where disturbed other Run values: '$SentinelName' is now '$current' (expected '$SentinelValue')."
+        throw @"
+'$SentinelName' is now '$current' (expected '$SentinelValue'), so a Run value that belongs to
+neither this product nor the step being tested disappeared inside the $Where window.
+State at failure: $(Get-RunState)
+
+Two things can do that, and the state above says which one it was:
+  - this script dropped the value itself. New-Item -Force recreates a registry key and
+    takes every value in it with it, so Run is only ever created when it is missing
+    (Ensure-RunKey) and each seeding step is checked by Assert-ForeignRunNamesPreserved.
+    If the key is empty, look there first.
+  - another program removed the entry while the run was in progress (a startup-cleaning
+    utility, or a manual registry edit). The sentinel points at a real executable, so it
+    is not removed merely for pointing at a path that does not exist.
+"@
+    }
+}
+
+function Assert-ForeignRunNamesPreserved {
+    param([string[]]$Expected, [string]$Where)
+    # Spans two statements of this script and nothing else, so a name that disappears
+    # in between was dropped by this script rather than by a cleaner that happened to
+    # run while the verification was in progress. This is the check that would have
+    # caught the New-Item -Force bug on the spot instead of at the sentinel, one step
+    # later and with the wrong suspect named.
+    $now = @(Get-ForeignRunNames)
+    $lost = @($Expected | Where-Object { $now -notcontains $_ })
+    if ($lost.Count) {
+        throw "This script's own '$Where' step removed Run value(s) belonging to other programs: $($lost -join ', '). Only '$RunValueName' and the temporary '$SentinelName' may be written. State: $(Get-RunState)"
     }
 }
 
@@ -367,7 +479,7 @@ function Assert-UninstallWindow {
 # ---------------------------------------------------------------------------
 
 Write-Host ''
-Write-Host "=== Token Monitor (Qt) install verification (version $Version) ==="
+Write-Host "=== Token Monitor (Qt) install verification (version $(if ($Version) { $Version } else { 'unknown' })) ==="
 $running = Test-TokenMonitorRunning
 if ($running.Count) {
     throw "Token Monitor processes are running ($($running -join ', ')). Close them and re-run: the uninstall pass deletes the directories they hold open."
@@ -434,8 +546,15 @@ Write-Step "B. Silent install into $InstallDir"
 $passError = $null
 $electronBeforeInstall = Get-RunValue $ElectronRunValueName
 try {
-    New-Item -Path $RunKeyPath -Force | Out-Null
+    # Snapshot before the key is touched at all. A destructive creation step is exactly
+    # what this guard exists to catch, so the comparison must not start from the state
+    # that step left behind - taking it after Ensure-RunKey made the guard blind to the
+    # very bug it was written for.
+    $foreignBeforeSeed = @(Get-ForeignRunNames)
+    Ensure-RunKey
     Set-ItemProperty -Path $RunKeyPath -Name $SentinelName -Value $SentinelValue
+    Assert-ForeignRunNamesPreserved -Expected $foreignBeforeSeed -Where 'seed'
+    Assert-SentinelIntact 'seed (nothing of ours has run yet)'
 
     $runBeforeInstall = Get-RunValue $RunValueName
     Invoke-SilentExecutable -FilePath $InstallerPath -Arguments "/S /D=$InstallDir" -What 'the installer'
@@ -457,14 +576,19 @@ try {
     Write-Host '  installed files, shortcuts and uninstall entry are present; the installer left autostart and other Run values alone'
 
     & (Join-Path $ScriptDir 'smoke-test.ps1') -Dir $InstallDir -Label 'installed'
+    # Narrow the window: if the sentinel is gone before the uninstaller runs, the
+    # uninstaller is not the one to blame and the message says so.
+    Assert-SentinelIntact 'install plus the widget/CLI runs (the uninstaller has not run yet)'
 
     Write-Step 'B. Silent uninstall (/S: remove everything, shared data included)'
 
     # An entry that points into this install directory is ours to clean up: uninstalling
     # must not leave a stale autostart pointing at a deleted exe.
-    New-Item -Path $RunKeyPath -Force | Out-Null
+    $foreignBeforeUninstallSeed = @(Get-ForeignRunNames)
+    Ensure-RunKey
     $insideRunValue = '"' + (Join-Path $InstallDir 'TokenMonitorQt.exe') + '"'
     Set-ItemProperty -Path $RunKeyPath -Name $RunValueName -Value $insideRunValue
+    Assert-ForeignRunNamesPreserved -Expected $foreignBeforeUninstallSeed -Where 'uninstall-seed'
 
     $electronBeforeUninstall = Get-RunValue $ElectronRunValueName
     Invoke-SilentExecutable -FilePath (Join-Path $InstallDir 'Uninstall.exe') -Arguments '/S' -What 'the uninstaller'
@@ -522,7 +646,8 @@ Set-Content -LiteralPath $qtOwnedProbe -Value '{"probe":true}' -Encoding ascii
 # build, a second install). The widget may adopt it into settings, but neither the
 # installer nor the uninstaller may repoint or delete it. The sentinel covers the
 # same ground for values that belong to entirely different programs.
-New-Item -Path $RunKeyPath -Force | Out-Null
+$foreignBeforeSeedC = @(Get-ForeignRunNames)
+Ensure-RunKey
 $foreignRunValue = '"C:\tmon-elsewhere\TokenMonitorQt.exe"'
 Set-ItemProperty -Path $RunKeyPath -Name $RunValueName -Value $foreignRunValue
 Set-ItemProperty -Path $RunKeyPath -Name $SentinelName -Value $SentinelValue
@@ -530,9 +655,11 @@ Set-ItemProperty -Path $RunKeyPath -Name $SentinelName -Value $SentinelValue
 $passError = $null
 $electronBeforePassC = Get-RunValue $ElectronRunValueName
 try {
+    Assert-ForeignRunNamesPreserved -Expected $foreignBeforeSeedC -Where 'keepdata seed'
     Invoke-SilentExecutable -FilePath $InstallerPath -Arguments "/S /D=$InstallDir" -What 'the installer'
     Assert-SentinelIntact 'installer (keepdata pass)'
     & (Join-Path $ScriptDir 'smoke-test.ps1') -Dir $InstallDir -Label 'installed (keepdata pass)'
+    Assert-SentinelIntact 'install plus the widget/CLI runs, keepdata pass (the uninstaller has not run yet)'
 
     # Snapshot what the uninstaller is about to look at, instead of assuming what a
     # profile contains. A clean machine has no settings.json at all - the widget only
