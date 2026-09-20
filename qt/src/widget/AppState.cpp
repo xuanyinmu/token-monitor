@@ -54,6 +54,14 @@ QString startAtLoginCommand()
 {
     return QStringLiteral("\"%1\"").arg(QDir::toNativeSeparators(QCoreApplication::applicationFilePath()));
 }
+
+// Whether Windows currently autostarts our widget. Electron reads the same state
+// through app.getLoginItemSettings().openAtLogin.
+bool startAtLoginRegistered()
+{
+    QSettings run(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"), QSettings::NativeFormat);
+    return !run.value(QStringLiteral("TokenMonitor")).toString().trimmed().isEmpty();
+}
 #endif
 
 QVariantMap rowOf(const QString &id, const QString &label, double tokens, double cost, double total)
@@ -560,6 +568,7 @@ void AppState::attachWindow(QWindow *window)
         rebuildRows();
     }
     applyTopEdge();
+    if (!m_previewOnly) syncStartAtLoginFromOs();
     if (m_view == QLatin1String("status")) refreshServiceStatus();
 }
 
@@ -1414,6 +1423,29 @@ void AppState::applyTopEdge()
 {
     if (!m_window) return;
     m_window->setTopEdgeEnabled(m_settings.value(QStringLiteral("topEdgeHideEnabled")).toBool());
+}
+
+// Electron syncLoginItemSettingFromOs() (main.js): the OS login item is the source
+// of truth, and settings is synced to it. The Qt build needs the same because the
+// Run value can be written by something other than this widget - the 0.57 installer
+// shipped an autostart component that was selected by default, which is how a
+// machine ended up starting the widget while settings.json said startAtLogin: false.
+// Adoption makes the Settings toggle show the truth, so the user can turn it off in
+// one place. Deliberately does not reuse updateSetting(): that path rewrites the Run
+// value with this copy's own path, which would repoint an entry that another copy
+// (portable or a second install) owns.
+void AppState::syncStartAtLoginFromOs()
+{
+#ifdef Q_OS_WIN
+    const bool registered = startAtLoginRegistered();
+    if (jsonFlag(m_settings.value(QStringLiteral("startAtLogin")), false) == registered) return;
+    m_settings.insert(QStringLiteral("startAtLogin"), registered);
+    SettingsStore::save(m_settings);
+    m_settingsUi = CredentialStore::redactedForUi(m_settings);
+    emit settingsChanged();
+#else
+    Q_UNUSED(this);
+#endif
 }
 
 // The packaging smoke test runs the dock/reveal cycle without a mouse: that cycle

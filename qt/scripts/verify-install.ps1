@@ -382,7 +382,18 @@ Write-Host "  backup + SHA256 manifest: $BackupRoot"
 # ---------------------------------------------------------------------------
 
 Write-Step "B. Silent install into $InstallDir"
+
+# The installer must not touch autostart at all. 0.57 shipped a "start with Windows"
+# component that NSIS selects by default, so machines started the widget at login
+# while settings.json said startAtLogin: false - and the widget's own switch showed
+# "off" and could not explain it. Autostart belongs to the widget setting alone, so
+# this compares the HKCU value before and after the install instead of expecting one.
+$runBeforeInstall = (Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).$RunValueName
 Invoke-SilentExecutable -FilePath $InstallerPath -Arguments "/S /D=$InstallDir" -What 'the installer'
+$runAfterInstall = (Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).$RunValueName
+if ($runAfterInstall -ne $runBeforeInstall) {
+    throw "The installer changed the HKCU Run value '$RunValueName' ('$runBeforeInstall' -> '$runAfterInstall'); autostart belongs to the widget's own startAtLogin setting."
+}
 
 Assert-PathExists (Join-Path $InstallDir 'TokenMonitorQt.exe') 'the widget'
 Assert-PathExists (Join-Path $InstallDir 'TokenMonitorHub.exe') 'the hub CLI'
@@ -393,17 +404,18 @@ Assert-PathExists (Join-Path $InstallDir 'sqldrivers\qsqlite.dll') 'the SQLite d
 Assert-PathExists (Join-Path $InstallDir 'Uninstall.exe') 'the uninstaller'
 Assert-PathExists $ShortcutPaths[0] 'the Start-menu shortcut'
 Assert-PathExists $UninstallKeyPath 'the "Apps & features" entry'
-$runValue = (Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).$RunValueName
-# Windows needs the value quoted: the install path contains a space.
-$expectedRunValue = '"' + (Join-Path $InstallDir 'TokenMonitorQt.exe') + '"'
-if ($runValue -ne $expectedRunValue) {
-    throw "The autostart Run value is '$runValue'; expected '$expectedRunValue' (a quoted path to the installed widget)."
-}
-Write-Host '  installed files, shortcuts, autostart value and uninstall entry are present'
+Write-Host '  installed files, shortcuts and uninstall entry are present; the installer left autostart alone'
 
 & (Join-Path $ScriptDir 'smoke-test.ps1') -Dir $InstallDir -Label 'installed'
 
 Write-Step 'B. Silent uninstall (/S: remove everything, shared data included)'
+
+# An entry that points into this install directory is ours to clean up: uninstalling
+# must not leave a stale autostart pointing at a deleted exe.
+New-Item -Path $RunKeyPath -Force | Out-Null
+$insideRunValue = '"' + (Join-Path $InstallDir 'TokenMonitorQt.exe') + '"'
+Set-ItemProperty -Path $RunKeyPath -Name $RunValueName -Value $insideRunValue
+
 Invoke-SilentExecutable -FilePath (Join-Path $InstallDir 'Uninstall.exe') -Arguments '/S' -What 'the uninstaller'
 
 Assert-Gone $InstallDir 'the install directory'
@@ -413,8 +425,9 @@ Assert-Gone $AppDataDir 'the shared user data directory (silent uninstall delete
 Assert-Gone $LocalDataDir 'the Qt cache directory under %LOCALAPPDATA%'
 Assert-Gone $JavisCacheDir "Qt's %LOCALAPPDATA%\Javis cache directory"
 Assert-Gone $UninstallKeyPath 'the "Apps & features" entry'
-if ((Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).$RunValueName) {
-    throw "Uninstall left the HKCU Run value '$RunValueName' behind."
+$runAfterUninstall = (Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).$RunValueName
+if ($runAfterUninstall) {
+    throw "Uninstall left the autostart entry '$runAfterUninstall' behind, which pointed into $InstallDir."
 }
 Get-SavedRunValue -State $state
 Write-Host '  no residue: install dir, shortcuts, autostart value, uninstall entry, data and caches are gone'
@@ -443,6 +456,13 @@ if (-not (Test-Path -LiteralPath $sharedMarker)) {
 $qtOwnedProbe = Join-Path $AppDataDir 'qt-verify-probe.json'
 Set-Content -LiteralPath $qtOwnedProbe -Value '{"probe":true}' -Encoding ascii
 
+# An autostart entry that points somewhere else belongs to another copy (a portable
+# build, a second install). The widget may adopt it into settings, but neither the
+# installer nor the uninstaller may repoint or delete it.
+New-Item -Path $RunKeyPath -Force | Out-Null
+$foreignRunValue = '"C:\tmon-elsewhere\TokenMonitorQt.exe"'
+Set-ItemProperty -Path $RunKeyPath -Name $RunValueName -Value $foreignRunValue
+
 Invoke-SilentExecutable -FilePath $InstallerPath -Arguments "/S /D=$InstallDir" -What 'the installer'
 & (Join-Path $ScriptDir 'smoke-test.ps1') -Dir $InstallDir -Label 'installed (keepdata pass)'
 
@@ -463,9 +483,11 @@ Assert-Gone $ShortcutPaths[0] 'the Start-menu shortcut (keepdata pass)'
 Assert-Gone $LocalDataDir 'the Qt cache directory (keepdata pass)'
 Assert-Gone $qtOwnedProbe 'the Qt-owned qt-* scratch file (keepdata pass)'
 Assert-PathExists $sharedMarker 'the shared Chromium marker kept by /KEEPDATA'
-if ((Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).$RunValueName) {
-    throw "Uninstall left the HKCU Run value '$RunValueName' behind (keepdata pass)."
+$foreignAfter = (Get-ItemProperty -Path $RunKeyPath -ErrorAction SilentlyContinue).$RunValueName
+if ($foreignAfter -ne $foreignRunValue) {
+    throw "Uninstall disturbed an autostart entry that points outside $InstallDir (was '$foreignRunValue', now '$foreignAfter')."
 }
+Write-Host '  the autostart entry pointing outside the install directory was left alone'
 Assert-PathAbsent (Join-Path $AppDataDir 'limits-snapshot.json') 'Qt-only limits-snapshot.json'
 Assert-PathAbsent (Join-Path $AppDataDir 'data') "Qt-only data\ directory"
 Assert-PathAbsent (Join-Path $AppDataDir 'tokscale.exe') 'the Qt-installed tokscale.exe'

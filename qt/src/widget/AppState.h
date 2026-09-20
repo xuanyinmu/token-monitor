@@ -230,6 +230,12 @@ private:
     void persist();
     void ensureCurrencyRate();
     void applyTopEdge();
+    // Electron syncLoginItemSettingFromOs(): read the real Windows autostart state
+    // and adopt it into settings, so a Run value written outside the widget (an
+    // older installer, another copy) is shown as enabled instead of contradicting
+    // it. Never writes the registry: this copy must not repoint an entry that
+    // belongs to another copy.
+    void syncStartAtLoginFromOs();
     void seedServiceStatusPlaceholders();
     void refreshHealthCounts();
     void rebuildDashboard();

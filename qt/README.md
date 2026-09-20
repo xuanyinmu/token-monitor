@@ -33,7 +33,7 @@ Other binaries: `TokenMonitorHub.exe`, `TokenMonitorAgent.exe` (console CLIs). W
 2. `windeploy.ps1` when `qt\build` has no deployed runtime yet.
 3. **Stage** `qt\out\package`: the three exes, `build\*.dll`, the plugin directories (`platforms`, `styles`, `tls`, `imageformats`, `iconengines`, `networkinformation`, `sqldrivers`, `generic`, `qml`), the **app-local MSVC runtime** (`Microsoft.VC143.CRT`, from `VCToolsRedistDir`), `tokscale.exe`, `LICENSE` and `installer\README.txt`. No `vc_redist.x64.exe` (25 MB, needs elevation), no CMake/ninja leftovers, no test binaries.
 4. **Assert** the files a missing piece would silently break: `msvcp140.dll`, `vcruntime140.dll`, `platforms\qwindows.dll`, `tls\qschannelbackend.dll`, `iconengines\qsvgicon.dll`, `sqldrivers\qsqlite.dll`, `tokscale.exe`, `qml\QtQuick\Controls\Basic`. A missing `qsqlite.dll` costs Cursor's token fallback and Qoder CN usage; a missing CRT means the exe does not start at all.
-5. **Smoke test** (`scripts\smoke-test.ps1`) with `PATH` stripped to `System32`, so a deployment that only works because the development machine has Qt on PATH fails here: `TokenMonitorQt.exe --screenshot` must produce a real PNG (retrying with `QT_QUICK_BACKEND=software` for GPU-less runners) and both CLIs must answer `--help`.
+5. **Smoke test** (`scripts\smoke-test.ps1`) with `PATH` stripped to `System32`, so a deployment that only works because the development machine has Qt on PATH fails here: `TokenMonitorQt.exe --screenshot` must produce a real PNG (retrying with `QT_QUICK_BACKEND=software` for GPU-less runners), `TokenMonitorQt.exe --self-test-top-edge` must print `top-edge-ok` (the dock/reveal cycle that crashed 0.57), and both CLIs must answer `--help`.
 6. Portable ZIP (`Compress-Archive`, contents at the ZIP root), then the NSIS installer.
 
 `tokscale.exe` is a hard dependency (the widget has no self-download path), so packaging takes `-TokscalePath`, else the first copy whose SHA256 matches `scripts\vendor\tokscale.json` — `%APPDATA%\Token Monitor\tokscale.exe`, or the npm CLI package under `node_modules\@tokscale\cli-win32-x64-msvc\bin` so a checkout can package offline — else the pinned release asset, and it **fails** rather than shipping a package that cannot scan.
@@ -61,15 +61,15 @@ Packaging adds two things windeployqt does not: the MSVC runtime DLLs (app-local
 ## Installer behaviour
 
 - Per-user, `%LOCALAPPDATA%\Programs\Token Monitor Qt`, `RequestExecutionLevel user` (no UAC), directory page available — same mode as the Electron build's NSIS installer.
-- Components: the app (required), desktop shortcut (optional), start with Windows (optional, off by default; writes the HKCU Run value `TokenMonitor` — the same value name the widget's `startAtLogin` setting writes).
-- The widget exe carries its own icon (`resources/app.rc` → `resources/app.ico`), which the installer, shortcuts and the "Apps & features" entry reuse.
+- Components: the app (required) and a desktop shortcut (optional). There is deliberately **no** "start with Windows" component: 0.57 had one that NSIS selects by default, which started the widget at login while `settings.json` still said `startAtLogin: false`. Autostart now belongs to the widget's own Settings → start with Windows, and the widget syncs that setting from the Windows state at startup (the same thing Electron does with `syncLoginItemSettingFromOs`), so an entry written by anything else is shown as enabled and can be turned off in one place.
+- The widget exe carries its own icon (`resources/app.rc.in` → `resources/app.ico`) and a version resource generated from `tmon.h`, so crash reports and Task Manager identify the build (0.57 reported `0.0.0.0`).
 - `README.txt` in the install directory explains the binaries, the data locations and the uninstall contract.
 
 ## Uninstalling (leaves nothing behind)
 
 `Uninstall.exe`, or Settings → Apps → Token Monitor (Qt).
 
-The uninstaller stops the widget/hub/agent, then removes the install directory, both shortcuts, the autostart value, the "Apps & features" entry, and every file this build writes: `%APPDATA%\Token Monitor\limits-snapshot.json`, `data\`, `qt-*.json`, `qt-*.log`, `tokscale.exe`; `%LOCALAPPDATA%\Token Monitor\cache`; `%LOCALAPPDATA%\Javis\Token Monitor`. Empty husks are pruned.
+The uninstaller stops the widget/hub/agent, then removes the install directory, both shortcuts, the "Apps & features" entry, and every file this build writes: `%APPDATA%\Token Monitor\limits-snapshot.json`, `data\`, `qt-*.json`, `qt-*.log`, `tokscale.exe`; `%LOCALAPPDATA%\Token Monitor\cache`; `%LOCALAPPDATA%\Javis\Token Monitor`. Empty husks are pruned. The autostart entry is removed **only when it points into the install directory being removed** — an entry pointing elsewhere belongs to another copy (portable build, second install) and is left alone.
 
 `%APPDATA%\Token Monitor` is shared with the Electron build (`settings.json`, `credentials.json`, `history.json`, … belong to both), so the whole directory is only removed when it holds no Electron trace, or when the user answers Yes, or on a silent uninstall. `Uninstall.exe /S` removes everything; `Uninstall.exe /S /KEEPDATA` keeps the files shared with the Electron build. Interactive runs ask, and the details pane reports what is left if anything survived.
 
@@ -82,8 +82,8 @@ The uninstaller stops the widget/hub/agent, then removes the install directory, 
 Refuses to run while a Token Monitor process is alive, backs up `%APPDATA%\Token Monitor`, `%LOCALAPPDATA%\Token Monitor` and `%LOCALAPPDATA%\Javis` (plus the Run value, the uninstall key and the shortcuts) with a SHA256 manifest, then:
 
 - **A** extracts the portable ZIP (asserting the ZIP root has no extra folder) and smoke tests it with an isolated `TOKEN_MONITOR_USER_DATA`;
-- **B** silently installs, checks the installed files/shortcuts/autostart/uninstall entry, smoke tests, silently uninstalls, and asserts the whole footprint is gone;
-- **C** installs and uninstalls with `/S /KEEPDATA`, asserting the Qt-owned files are gone while the shared ones (and the Electron-only Chromium markers) survive.
+- **B** silently installs, checks the installed files/shortcuts/uninstall entry, asserts the installer left the HKCU autostart value **untouched**, smoke tests (including the top-edge self-test), seeds an autostart entry pointing into the install directory, silently uninstalls, and asserts the whole footprint is gone;
+- **C** seeds an autostart entry pointing *outside* the install directory, installs and uninstalls with `/S /KEEPDATA`, and asserts the Qt-owned files are gone, the shared ones (and the Electron-only Chromium markers) survive, and the outside entry was not disturbed.
 
 After each pass the backup is restored and re-hashed: a mismatch is an error, so the destructive part cannot leave the machine changed. `package.ps1 -VerifyInstall` runs this automatically; CI runs it on every build.
 

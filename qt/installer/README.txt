@@ -21,17 +21,21 @@ builds share one configuration, history and credential store.
 
 Autostart
 ---------
-The installer's optional "Start with Windows" component writes the HKCU Run
-value "TokenMonitor" pointing at this folder's TokenMonitorQt.exe. Settings >
-startAtLogin in the widget writes the same value.
+There is no "start with Windows" option in this installer: autostart belongs to the
+widget itself (Settings > start with Windows). The widget also reads the Windows state
+when it starts, so an entry left behind by an older installer shows up as enabled and
+can be switched off there. The entry it writes is quoted, because this folder's path
+contains a space.
 
 Uninstalling (leaves nothing behind)
 ------------------------------------
 Settings > Apps > Token Monitor (Qt) > Uninstall, or run Uninstall.exe.
 
 The uninstaller stops the widget/hub/agent, then removes this folder, both
-shortcuts, the autostart value and the "Apps & features" entry, plus every file
-this build writes:
+shortcuts, the "Apps & features" entry and every file this build writes. The
+autostart entry is removed only when it points into this folder - one that points
+elsewhere belongs to another copy (a portable build or a second install) and is left
+alone. Files removed:
   %APPDATA%\Token Monitor\limits-snapshot.json
   %APPDATA%\Token Monitor\data\
   %APPDATA%\Token Monitor\qt-*.json, qt-*.log

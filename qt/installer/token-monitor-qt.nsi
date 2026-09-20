@@ -167,17 +167,18 @@ Section "Desktop shortcut" SEC_DESKTOP
   CreateShortCut "$DESKTOP\${SHORTCUT_NAME}" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_EXE}" 0
 SectionEnd
 
-Section "Start with Windows" SEC_AUTOSTART
-  # Same value name the widget writes from Settings > startAtLogin, and quoted
-  # because the default install path contains a space: Windows' Run-key parsing
-  # splits an unquoted path and the app silently never starts.
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${RUN_VALUE}" '"$INSTDIR\${APP_EXE}"'
-SectionEnd
+# There is deliberately no "start with Windows" component here. An installer
+# checkbox is a second writer of the HKCU value the widget itself owns, and in 0.57
+# it shipped selected by default (NSIS selects sections unless they use the /o
+# flag): machines started the widget at login while settings.json still said
+# startAtLogin: false, so the widget's own switch showed "off" and could not explain
+# the behaviour. Autostart belongs to the widget alone now (Settings > start with
+# Windows), which is also how the Electron build works - no installer component, and
+# its setting is synced from the Windows state at startup.
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_CORE} "The widget, the hub and the agent CLI, the Qt runtime and the bundled tokscale scanner."
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_DESKTOP} "Create a shortcut on the desktop."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_AUTOSTART} "Start Token Monitor when you sign in (can also be changed later in Settings)."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 # ---------------------------------------------------------------------------
@@ -197,10 +198,27 @@ Section "Uninstall"
   ExecWait '"$SYSDIR\taskkill.exe" /F /IM TokenMonitorAgent.exe'
   Sleep 800
 
-  # 2) Shell integration, autostart and the "Apps & features" entry.
+  # 2) Shell integration, the autostart entry and the "Apps & features" entry.
+  #    The Run value is only removed when it points into THIS install directory: the
+  #    widget (or a portable copy, or a second install next to this one) owns that
+  #    value now, and uninstalling one copy must not silently stop another.
   Delete "$SMPROGRAMS\${SHORTCUT_NAME}"
   Delete "$DESKTOP\${SHORTCUT_NAME}"
-  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${RUN_VALUE}"
+  ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${RUN_VALUE}"
+  ${If} $0 != ""
+    StrCpy $1 $0 1                          # the widget writes a quoted path
+    ${If} $1 == '"'
+      StrCpy $0 $0 "" 1
+    ${EndIf}
+    StrLen $2 "$INSTDIR"
+    StrCpy $3 $0 $2
+    ${If} $3 == "$INSTDIR"
+      DetailPrint "Removing the autostart entry (it points into $INSTDIR)"
+      DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${RUN_VALUE}"
+    ${Else}
+      DetailPrint "Keeping the autostart entry '$0': it points outside $INSTDIR"
+    ${EndIf}
+  ${EndIf}
   DeleteRegKey HKCU "${UNINST_KEY}"
 
   # 3) Qt-owned files inside the shared user data directory. These names are
@@ -384,10 +402,20 @@ Section "Uninstall"
     DetailPrint "leftover: $INSTDIR\${APP_EXE}"
     StrCpy $residue "1"
   ${EndIf}
+  # An autostart entry is only residue when it points into this install directory; one
+  # that points elsewhere belongs to another copy and was deliberately kept (step 2).
   ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${RUN_VALUE}"
   ${If} $0 != ""
-    DetailPrint "leftover: HKCU Run ${RUN_VALUE}"
-    StrCpy $residue "1"
+    StrCpy $1 $0 1
+    ${If} $1 == '"'
+      StrCpy $0 $0 "" 1
+    ${EndIf}
+    StrLen $2 "$INSTDIR"
+    StrCpy $3 $0 $2
+    ${If} $3 == "$INSTDIR"
+      DetailPrint "leftover: HKCU Run ${RUN_VALUE}"
+      StrCpy $residue "1"
+    ${EndIf}
   ${EndIf}
   ReadRegStr $0 HKCU "${UNINST_KEY}" "DisplayName"
   ${If} $0 != ""
