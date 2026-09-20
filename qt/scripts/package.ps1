@@ -205,8 +205,17 @@ function Find-Makensis {
 # Build
 # ---------------------------------------------------------------------------
 
+# A CI failure has to say where it stopped, so every phase stamps elapsed time.
+$script:PackageWatch = [System.Diagnostics.Stopwatch]::StartNew()
+function Write-Phase {
+    param([string]$Text)
+    Write-Host ''
+    Write-Host ("--- {0} (t+{1:N1}s) ---" -f $Text, $script:PackageWatch.Elapsed.TotalSeconds)
+}
+
 Write-Host ''
 Write-Host '=== Token Monitor (Qt) packaging ==='
+Write-Phase 'build'
 
 if (-not $SkipBuild) {
     & (Join-Path $PSScriptRoot 'build.ps1') $Configuration
@@ -240,7 +249,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $BuildDir 'platforms\qwindows.dll'))
 # Stage
 # ---------------------------------------------------------------------------
 
-Write-Host ''
+Write-Phase 'stage: whitelisted deployment'
 Write-Host "Staging $Stage"
 if (Test-Path -LiteralPath $Stage) { Remove-Item -LiteralPath $Stage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
@@ -262,15 +271,18 @@ $crtDir = Resolve-CrtDir
 if (-not $crtDir) {
     throw 'Could not find the MSVC runtime DLLs (Microsoft.VC*.CRT). Run from a Developer PowerShell / vsdevcmd shell, or set VCToolsRedistDir.'
 }
+Write-Phase 'stage: app-local MSVC runtime'
 Write-Host "MSVC runtime: $crtDir"
 Copy-Item -Path (Join-Path $crtDir '*.dll') -Destination $Stage -Force
 
+Write-Phase 'stage: tokscale'
 Install-Tokscale -Destination (Join-Path $Stage 'tokscale.exe') -Explicit $TokscalePath
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'LICENSE') -Destination $Stage -Force
 Copy-Item -LiteralPath (Join-Path $InstallerDir 'README.txt') -Destination $Stage -Force
 
 # Required-file assertions: each of these has caused (or would cause) a silent
 # runtime failure - a missing plugin only shows up as a dead feature.
+Write-Phase 'assert staged deployment'
 $required = @(
     'TokenMonitorQt.exe',
     'TokenMonitorHub.exe',
@@ -295,6 +307,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $Stage 'vcruntime140_1.dll'))) {
 $stagedBytes = (Get-ChildItem -LiteralPath $Stage -Recurse -File | Measure-Object -Property Length -Sum).Sum
 Write-Host ("Staged {0:N1} MB" -f ($stagedBytes / 1MB))
 
+Write-Phase 'smoke test the staged tree'
 & (Join-Path $PSScriptRoot 'smoke-test.ps1') -Dir $Stage -Label 'portable'
 
 # ---------------------------------------------------------------------------
@@ -303,6 +316,7 @@ Write-Host ("Staged {0:N1} MB" -f ($stagedBytes / 1MB))
 
 $zipPath = Join-Path $OutRoot ("Token-Monitor-Qt-{0}-win-x64-portable.zip" -f $Version)
 Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+Write-Phase 'portable ZIP'
 Write-Host "Compressing $zipPath"
 Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $zipPath -CompressionLevel Optimal
 
@@ -315,6 +329,7 @@ if ($NoInstaller) {
     Write-Host 'Skipping the installer (-NoInstaller).'
     Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
 } else {
+    Write-Phase 'NSIS installer'
     $makensis = Find-Makensis -Explicit $MakensisPath
     if (-not $makensis) {
         Write-Host ''
@@ -346,7 +361,7 @@ The portable ZIP above is complete and can be shipped as-is.
 # Report
 # ---------------------------------------------------------------------------
 
-Write-Host ''
+Write-Phase 'report'
 Write-Host 'Artifacts'
 foreach ($artifact in @($installerPath, $zipPath)) {
     if (Test-Path -LiteralPath $artifact) {
@@ -358,5 +373,6 @@ foreach ($artifact in @($installerPath, $zipPath)) {
 Write-Host ("  stage (portable tree): {0}" -f $Stage)
 
 if ($VerifyInstall) {
+    Write-Phase 'install/uninstall verification'
     & (Join-Path $PSScriptRoot 'verify-install.ps1') -InstallerPath $installerPath -PortableZipPath $zipPath -Version $Version
 }

@@ -47,35 +47,62 @@ function Test-RenderedPng {
 
 $savedPath = $env:PATH
 $savedBackend = $env:QT_QUICK_BACKEND
-$png = Join-Path ([System.IO.Path]::GetTempPath()) ("tmon-smoke-{0}.png" -f ([guid]::NewGuid().ToString('N')))
+$tempDir = [System.IO.Path]::GetTempPath()
+$stamp = [guid]::NewGuid().ToString('N')
+$png = Join-Path $tempDir "tmon-smoke-$stamp.png"
+$stdout = Join-Path $tempDir "tmon-smoke-$stamp.out"
+$stderr = Join-Path $tempDir "tmon-smoke-$stamp.err"
 
 try {
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
 
     $rendered = $false
+    $notes = New-Object System.Collections.Generic.List[string]
     foreach ($backend in @('default', 'software')) {
         if ($backend -eq 'software') { $env:QT_QUICK_BACKEND = 'software' }
         else { Remove-Item Env:QT_QUICK_BACKEND -ErrorAction SilentlyContinue }
         Remove-Item -LiteralPath $png -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
 
-        $proc = Start-Process -FilePath $exe -ArgumentList @('--screenshot', $png) -PassThru
-        if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
-            $proc.Kill()
-            throw "[$Label] smoke test: --screenshot did not exit within ${TimeoutSeconds}s"
-        }
-        if (Test-RenderedPng -Path $png) {
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $proc = Start-Process -FilePath $exe -ArgumentList @('--screenshot', $png) -PassThru `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        $exited = $proc.WaitForExit($TimeoutSeconds * 1000)
+        $watch.Stop()
+        $elapsed = [int]$watch.Elapsed.TotalSeconds
+
+        if ($exited -and (Test-RenderedPng -Path $png)) {
             $bytes = [System.IO.File]::ReadAllBytes($png)
             $width = [uint32]$bytes[19] + ([uint32]$bytes[18] -shl 8) + ([uint32]$bytes[17] -shl 16) + ([uint32]$bytes[16] -shl 24)
             $height = [uint32]$bytes[23] + ([uint32]$bytes[22] -shl 8) + ([uint32]$bytes[21] -shl 16) + ([uint32]$bytes[20] -shl 24)
-            Write-Host "[$Label] QML rendered ($backend backend): ${width}x${height}, $($bytes.Length) byte PNG"
+            Write-Host "[$Label] QML rendered ($backend backend) after ${elapsed}s: ${width}x${height}, $($bytes.Length) byte PNG"
             $rendered = $true
             break
         }
-        $proc.Refresh()
-        Write-Warning "[$Label] --screenshot produced no usable PNG with the $backend backend (exit $($proc.ExitCode))"
+
+        if (-not $exited) {
+            # A hang is not evidence that the deployment is broken: the default
+            # backend needs a working GPU/driver path, which a CI runner may not
+            # have. Kill it and let the software backend have its turn.
+            $proc.Kill()
+            $proc.WaitForExit(15000) | Out-Null
+            $reason = "did not exit within ${TimeoutSeconds}s (killed)"
+        } else {
+            $proc.Refresh()
+            $reason = "exited $($proc.ExitCode) without a usable PNG"
+        }
+        $notes.Add("$backend backend $reason after ${elapsed}s")
+        Write-Warning "[$Label] $backend backend $reason after ${elapsed}s"
+        # The widget's own diagnostics are the useful part of a CI failure.
+        foreach ($stream in @($stdout, $stderr)) {
+            if ((Test-Path -LiteralPath $stream) -and (Get-Item -LiteralPath $stream).Length -gt 0) {
+                Write-Warning "[$Label] $(Split-Path -Leaf $stream) tail:"
+                Get-Content -LiteralPath $stream -Tail 20 | ForEach-Object { Write-Warning "  $_" }
+            }
+        }
     }
     if (-not $rendered) {
-        throw "[$Label] smoke test failed: the deployment cannot paint the widget out of its own directory."
+        throw "[$Label] smoke test failed: the deployment cannot paint the widget out of its own directory ($($notes -join '; '))."
     }
 
     foreach ($cli in @('TokenMonitorHub.exe', 'TokenMonitorAgent.exe')) {
@@ -91,4 +118,5 @@ try {
     if ($savedBackend) { $env:QT_QUICK_BACKEND = $savedBackend }
     else { Remove-Item Env:QT_QUICK_BACKEND -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $png -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
 }
