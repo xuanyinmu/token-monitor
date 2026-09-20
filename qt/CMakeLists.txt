@@ -121,9 +121,30 @@ set(TMON_WIDGET_SOURCES
 
 # Windowed subsystem: double-clicking the exe must not open a console.
 # --scan-once reattaches to the parent console at runtime (main.cpp).
+#
+# The resource file is generated from resources/app.rc.in so the exe identifies
+# itself (0.57 reported version 0.0.0.0 in crash reports). The version comes from
+# src/core/tmon.h — the same source scripts/package.ps1 reads for the installer
+# name — so the exe and the package cannot drift apart.
 set(TMON_RC_SOURCES)
 if(WIN32)
-    list(APPEND TMON_RC_SOURCES resources/app.rc)
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/src/core/tmon.h" TMON_VERSION_LINE REGEX "kAppVersion")
+    if(TMON_VERSION_LINE MATCHES "\"([0-9]+\\.[0-9]+\\.[0-9]+)\"")
+        set(TMON_VERSION "${CMAKE_MATCH_1}")
+    else()
+        set(TMON_VERSION "${PROJECT_VERSION}")
+        message(WARNING "Could not read kAppVersion from src/core/tmon.h; using ${PROJECT_VERSION} for the version resource.")
+    endif()
+    string(REPLACE "." ";" TMON_VERSION_PARTS "${TMON_VERSION}")
+    list(APPEND TMON_VERSION_PARTS "0")
+    list(SUBLIST TMON_VERSION_PARTS 0 4 TMON_VERSION_PARTS)
+    list(JOIN TMON_VERSION_PARTS "," TMON_VERSION_COMMA)
+    file(TO_NATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/resources/app.ico" TMON_ICON_NATIVE)
+    # rc.exe wants the backslashes escaped inside the quoted ICON path.
+    string(REPLACE "\\" "\\\\" TMON_ICON_PATH "${TMON_ICON_NATIVE}")
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc.in"
+                   "${CMAKE_CURRENT_BINARY_DIR}/app.rc" @ONLY)
+    list(APPEND TMON_RC_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
 endif()
 add_executable(TokenMonitor WIN32 ${TMON_WIDGET_SOURCES} ${TMON_RC_SOURCES})
 set_target_properties(TokenMonitor PROPERTIES OUTPUT_NAME TokenMonitorQt)

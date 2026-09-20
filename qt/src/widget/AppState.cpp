@@ -38,6 +38,7 @@
 #include <QWindow>
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 
 namespace tmon {
 
@@ -1413,6 +1414,51 @@ void AppState::applyTopEdge()
 {
     if (!m_window) return;
     m_window->setTopEdgeEnabled(m_settings.value(QStringLiteral("topEdgeHideEnabled")).toBool());
+}
+
+// The packaging smoke test runs the dock/reveal cycle without a mouse: that cycle
+// is what crashed 0.57 (the hide animation was freed on natural completion while
+// WidgetWindow still pointed at it, so the next reveal called stop() on freed
+// memory - 0xc0000005 inside QAbstractAnimation::stop()).
+//
+// The crash itself depends on the allocator reusing the freed block, so it is not a
+// reliable signal on a quiet machine. What IS deterministic is the invariant the fix
+// establishes: once an animation has finished, no handle to it may survive. Each leg
+// is therefore checked ~500 ms after it starts (the animation is 240 ms), and a
+// surviving handle fails the test loudly instead of crashing silently later.
+void AppState::selfTestTopEdge()
+{
+    if (!m_window) {
+        std::cout << "top-edge-error: no window" << std::endl;
+        std::cout.flush();
+        std::_Exit(1);
+    }
+    m_window->setTopEdgeEnabled(true);
+
+    constexpr int kLegs = 6;      // dock, reveal x3
+    constexpr int kLegMs = 700;   // > kTopEdgeAnimationMs (240)
+    constexpr int kStartMs = 400; // let the window be exposed first
+    constexpr int kCheckMs = 500; // > kTopEdgeAnimationMs, < kLegMs
+    for (int i = 0; i < kLegs; ++i) {
+        const bool dock = (i % 2) == 0;
+        QTimer::singleShot(kStartMs + i * kLegMs, this, [this, dock]() { m_window->dockTopEdge(dock); });
+        QTimer::singleShot(kStartMs + i * kLegMs + kCheckMs, this, [this, i]() {
+            if (!m_window->hasYAnimation()) return;
+            std::cout << "top-edge-stale-animation at leg " << (i + 1) << std::endl;
+            std::cout.flush();
+            std::_Exit(1);
+        });
+    }
+    QTimer::singleShot(kStartMs + kLegs * kLegMs, this, []() {
+        std::cout << "top-edge-ok" << std::endl;
+        std::cout.flush();
+        std::_Exit(0);
+    });
+    QTimer::singleShot(20000, this, []() {
+        std::cout << "top-edge-timeout" << std::endl;
+        std::cout.flush();
+        std::_Exit(1);
+    });
 }
 
 void AppState::startMove() { if (m_window) m_window->startMove(); }

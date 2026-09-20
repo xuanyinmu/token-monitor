@@ -63,6 +63,12 @@ int main(int argc, char *argv[])
     parser.addOption(viewOpt);
     QCommandLineOption dashOpt(QStringLiteral("open-dashboard"), QStringLiteral("Open the usage dashboard after launch"));
     parser.addOption(dashOpt);
+    // Automated coverage for the top-edge hide state machine: the packaging smoke
+    // test runs this instead of moving the real mouse (which a CI runner cannot do
+    // reliably). Prints top-edge-ok and exits 0.
+    QCommandLineOption topEdgeSelfTestOpt(QStringLiteral("self-test-top-edge"),
+                                          QStringLiteral("Exercise the top-edge dock/reveal path, print top-edge-ok and exit"));
+    parser.addOption(topEdgeSelfTestOpt);
     parser.process(app);
 
     if (parser.isSet(scanOnce)) {
@@ -78,7 +84,7 @@ int main(int argc, char *argv[])
     }
 
     tmon::AppState state;
-    if (parser.isSet(screenshotOpt))
+    if (parser.isSet(screenshotOpt) || parser.isSet(topEdgeSelfTestOpt))
         state.setPreviewOnly(true);
     if (parser.isSet(viewOpt)) {
         const auto v = parser.value(viewOpt);
@@ -127,6 +133,8 @@ int main(int argc, char *argv[])
             state.attachWindow(window);
             if (parser.isSet(dashOpt))
                 QTimer::singleShot(800, &state, &tmon::AppState::showDashboard);
+            if (parser.isSet(topEdgeSelfTestOpt))
+                QTimer::singleShot(0, &state, &tmon::AppState::selfTestTopEdge);
         }
     });
     engine.load(url);

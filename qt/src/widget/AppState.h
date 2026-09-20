@@ -161,6 +161,11 @@ public:
     Q_INVOKABLE QString viewIconFor(const QString &id) const;
     Q_INVOKABLE QVariantMap clientHealthCounts() const;
     Q_INVOKABLE void saveScreenshot(const QString &path);
+    // Drives the top-edge dock/reveal state machine without user input, so the
+    // packaging smoke test can cover the path that used to crash the process
+    // (see WidgetWindow::m_yAnimation). Prints top-edge-ok and exits 0; the
+    // watchdog prints top-edge-timeout and exits 1.
+    void selfTestTopEdge();
     Q_INVOKABLE void startAtLogin(bool on);
     Q_INVOKABLE void startMove();
     Q_INVOKABLE void startResize(const QString &edge);

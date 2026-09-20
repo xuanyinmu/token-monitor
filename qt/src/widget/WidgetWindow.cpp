@@ -196,13 +196,22 @@ void WidgetWindow::animateWindowY(int targetY, bool hiding)
     m_yAnimation->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
+bool WidgetWindow::hasYAnimation() const
+{
+    // Compared through the QPointer: after the animation finishes on its own this
+    // must already be false, which is what the packaging self-test asserts.
+    return m_yAnimation != nullptr;
+}
+
 void WidgetWindow::stopYAnimation()
 {
-    if (m_yAnimation) {
-        m_yAnimation->stop();
-        m_yAnimation->deleteLater();
-        m_yAnimation = nullptr;
-    }
+    // DeleteWhenStopped is the only owner: it frees the animation when it is stopped
+    // here and also when it finishes on its own, and the QPointer clears itself either
+    // way. A manual deleteLater() here used to be a second deletion path, which is
+    // what made the dangling handle look alive (see the member comment in the header).
+    if (!m_yAnimation) return;
+    m_yAnimation->stop();
+    m_yAnimation = nullptr;
 }
 
 void WidgetWindow::pollCursor()

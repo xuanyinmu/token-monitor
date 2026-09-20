@@ -1,0 +1,49 @@
+// Template for the widget's resource file. qt/CMakeLists.txt substitutes the icon
+// path, the version (read from src/core/tmon.h, the same source scripts/package.ps1
+// uses for the installer name) and writes the result into the build directory.
+//
+// Why it exists: the 0.57 crash reports said "TokenMonitorQt.exe, version 0.0.0.0",
+// because an exe without a version resource reports nothing - which makes Event
+// Viewer, Task Manager and WER useless for identifying the build.
+//
+// Keep this file ASCII-only, like the NSIS script: rc.exe decodes it using the
+// system code page. The VERSIONINFO numeric constants are spelled out instead of
+// including the SDK headers, so the template compiles with a bare rc.exe and no
+// include path of its own.
+
+#define VS_VERSION_INFO 1
+#define VS_FFI_FILEFLAGSMASK 0x0000003FL
+#define VOS_NT_WINDOWS32 0x00040004L
+#define VFT_APP 0x00000001L
+#define VFT2_UNKNOWN 0x00000000L
+
+1 ICON "@TMON_ICON_PATH@"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION @TMON_VERSION_COMMA@
+PRODUCTVERSION @TMON_VERSION_COMMA@
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Javis"
+            VALUE "FileDescription", "Token Monitor Qt widget"
+            VALUE "FileVersion", "@TMON_VERSION@"
+            VALUE "InternalName", "TokenMonitorQt"
+            VALUE "LegalCopyright", "MIT licensed"
+            VALUE "OriginalFilename", "TokenMonitorQt.exe"
+            VALUE "ProductName", "Token Monitor"
+            VALUE "ProductVersion", "@TMON_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -57,6 +57,7 @@ try {
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
 
     $rendered = $false
+    $renderedBackend = 'default'
     $notes = New-Object System.Collections.Generic.List[string]
     foreach ($backend in @('default', 'software')) {
         if ($backend -eq 'software') { $env:QT_QUICK_BACKEND = 'software' }
@@ -77,6 +78,7 @@ try {
             $height = [uint32]$bytes[23] + ([uint32]$bytes[22] -shl 8) + ([uint32]$bytes[21] -shl 16) + ([uint32]$bytes[20] -shl 24)
             Write-Host "[$Label] QML rendered ($backend backend) after ${elapsed}s: ${width}x${height}, $($bytes.Length) byte PNG"
             $rendered = $true
+            $renderedBackend = $backend
             break
         }
 
@@ -112,6 +114,47 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "[$Label] smoke test: $cli --help exited $LASTEXITCODE" }
     }
 
+    # The top-edge dock/reveal state machine destroyed the process in 0.57: the hide
+    # animation was freed when it finished while WidgetWindow still pointed at it, so
+    # the next reveal called stop() on freed memory (0xc0000005 in
+    # QAbstractAnimation::stop()). The widget drives that cycle itself under
+    # --self-test-top-edge - no mouse needed - and also asserts that no handle to a
+    # finished animation survives, which is the deterministic half of the bug.
+    if ($renderedBackend -eq 'software') { $env:QT_QUICK_BACKEND = 'software' }
+    else { Remove-Item Env:QT_QUICK_BACKEND -ErrorAction SilentlyContinue }
+    $selfOut = Join-Path $tempDir "tmon-smoke-$stamp-topedges.out"
+    $selfErr = Join-Path $tempDir "tmon-smoke-$stamp-topedges.err"
+    Remove-Item -LiteralPath $selfOut, $selfErr -Force -ErrorAction SilentlyContinue
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $proc = Start-Process -FilePath $exe -ArgumentList @('--self-test-top-edge') -PassThru `
+        -RedirectStandardOutput $selfOut -RedirectStandardError $selfErr
+    if (-not $proc.WaitForExit(60000)) {
+        $proc.Kill()
+        $proc.WaitForExit(15000) | Out-Null
+        throw "[$Label] top-edge self-test did not exit within 60s"
+    }
+    # Second call settles the process state: with Start-Process + a timed wait the
+    # ExitCode property can still be empty afterwards.
+    $proc.WaitForExit()
+    $proc.Refresh()
+    $watch.Stop()
+    $selfText = if (Test-Path -LiteralPath $selfOut) { (Get-Content -LiteralPath $selfOut -Raw).Trim() } else { '' }
+    # The marker is the contract (a crash prints nothing, the stale-handle and
+    # watchdog failures print their own line); the exit code is a secondary signal
+    # that may not be readable here.
+    $exitCode = $proc.ExitCode
+    $exitOk = ($null -eq $exitCode) -or ($exitCode -eq 0)
+    if ($selfText -notmatch 'top-edge-ok' -or -not $exitOk) {
+        foreach ($stream in @($selfOut, $selfErr)) {
+            if ((Test-Path -LiteralPath $stream) -and (Get-Item -LiteralPath $stream).Length -gt 0) {
+                Write-Warning "[$Label] $(Split-Path -Leaf $stream) tail:"
+                Get-Content -LiteralPath $stream -Tail 20 | ForEach-Object { Write-Warning "  $_" }
+            }
+        }
+        throw "[$Label] top-edge self-test failed (exit $exitCode after $([int]$watch.Elapsed.TotalSeconds)s): $selfText"
+    }
+    Write-Host "[$Label] top-edge self-test passed after $([int]$watch.Elapsed.TotalSeconds)s: $selfText"
+
     Write-Host "[$Label] smoke test passed"
 } finally {
     $env:PATH = $savedPath
@@ -119,4 +162,5 @@ try {
     else { Remove-Item Env:QT_QUICK_BACKEND -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $png -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $tempDir "tmon-smoke-$stamp-topedges.out"), (Join-Path $tempDir "tmon-smoke-$stamp-topedges.err") -Force -ErrorAction SilentlyContinue
 }
